@@ -1,0 +1,1251 @@
+---
+title: "Fraud Detection - Methodology Notebook"
+author: "Arjun Sekhar"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+## 1. Introduction
+
+### 1.1. Objective
+
+This notebook documents the analytical workflow used to investigate fraud detection using both traditional classification models and a survival-based approach. The aim is to compare the baseline banking-oriented models such as the Logistic Regression against a Random Survival Forest (RSF) framework under extreme class imbalance.
+
+### 1.2. Research Motivation
+
+Fraud detection is traditionally handled as a binary classification problem. However, fraud may also be understand using a time-to-event approach, where the question is not to detect whether fraud occurs, but also with how the fraud risk evolves over time. 
+
+### 1.3. Analytical Roadmap
+
+This notebook is structured to move from data understanding through to model development, evaluation, and interpretation, with a focus on both performance and explainability. It is thus organised as follows:
+
+1. Data Description: An overview of the dataset and its key characteristics.
+
+2. Data Preparation: Construction of modelling variables, including the proxy time index and handling of class imbalance.
+
+3. Exploratory Data Analysis (EDA): Examination of feature distributions and class imbalance patterns.
+
+4. Modelling Framework: Implementation of four model configurations, including Logistic Regression and Random Survival Forest (RSF), with and without SMOTE.
+
+5. Results: Evaluation of model performance using sensitivity, AUC, and AUPRC across repeated train-test splits.
+
+6. Explainability: Interpretation of model behaviour using global and local explanation techniques, including SHAP and LIME.
+
+7. Discussion and Banking Implications: Analysis of model performance and relevance to real-world fraud detection workflows.
+
+8. Limitations and Conclusion: Summary of findings, methodological limitations, and directions for future work.
+
+
+## 2. Libraries
+
+Some of the libraries that we use in this process that are to be loaded here include:
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(caret)
+library(pROC)
+library(PRROC)
+library(randomForest)
+library(randomForestSRC)
+library(survival)
+library(survminer)
+```
+
+Additionally to handle the Explainability, we incorporate the following packages specific to this:
+
+```{r, warning=FALSE, message=FALSE}
+library(SHAPforxgboost)
+library(iml)
+library(lime)
+```
+
+\newpage
+
+## 3. Data Description
+
+### 3.1. Load Data
+
+To start things off, we will set the seed, ingest the dataset and then omit the missing values. This will make the dataset become analysis-ready.
+
+```{r, warning=FALSE, message=FALSE}
+## Step 1: Set seed
+set.seed(44940076)
+
+## Step 3: Load Data
+fraud_data <- read.csv('creditcard.csv', header = TRUE)
+
+## Step 4: Remove Missing Values
+fraud_data <- na.omit(fraud_data)
+```
+
+### 3.2. Missing Values Check
+
+We will quickly check whether any of the columns have missing values in them.
+
+```{r, warning=FALSE, message=FALSE}
+colSums(is.na(fraud_data))
+```
+Good, this means that there is nothing much to worry about from the missingness standpoint. 
+
+### 3.3. Structure and Dimensions
+
+This next step will involve udnerstanding the structure and dimensions, such that we are able to understand the specifics of the data we are dealing with.
+
+```{r, echo=FALSE}
+dim(fraud_data)
+glimpse(fraud_data)
+summary(fraud_data)
+```
+
+
+### 3.4. Class Distribution
+
+Finally, we will see what the breakdown of the data is, based on the 'Class' variable. This will also establish the imbalance that we are dealing with here.
+
+```{r, warning=FALSE, message=FALSE}
+table(fraud_data$Class)
+prop.table(table(fraud_data$Class))
+```
+
+As shown above, there is a clear imbalance, where less than 1% of the data is recorded as a fraudulent transaction. 
+
+
+## 4. Initial Notes on the Dataset
+
+The dataset was loaded from the `creditcard.csv` file and was cleaned using the listwise deletion approach, which was through `na.omit()`. Following this step, there were no further missing values remaining in the dataset.
+
+Inspecting the response variable, we can see how the data is highly imbalanced, with fraudulent transactions representing a small proportion of the entire data. This is an important feature of the problem, as this directly impacts the model fitting, prediction quality, and the choice of evaluation metrics. 
+
+The predictor variables are largely anonymised, limited the direct substantiative interpretation of the individual features. However, the dataset remains useful for evaluating the model behaviour under extreme class imbalance.
+
+Although the original dataset is structured as a fraud detection problem, this study extends the analysis into a survival framework through the later construction of a proxied time-to-event representation. 
+
+
+## 5. Data Preparation
+
+In order to prepare for the section on the Exploratory Data Analysis (EDA), we want to ensure that the data has been generated and prepared appropriately, which is what we will focus on this section.
+
+### 5.1. Create the Survival Variables
+
+Firstly, we will work towards creating our respective survival variables, as this will set the scene to understand the structure of the data better.
+
+```{r, echo=TRUE}
+fraud_data$time <- 1:nrow(fraud_data)     # Proxy time index
+fraud_data$status <- fraud_data$Class     # Event indicator: 1 = fraud, 0 = non-fraud
+```
+
+### 5.2. Downsample Majority Class for Computational Efficiency
+
+The original dataset is highly imbalanced and computationally large. To make this more robust, all fraud cases were retained, while a random sample of 50000 non-fraud cases were selected. This preserves the minority class of the substantiative interest while reducing the runtime and memory burden of subsequent modelling work. This is what we call **downsampling**.
+
+```{r, include=FALSE}
+## Step 1: Split 'fraud_data' into Fraud and non-Fraud subsets.
+fraud_cases <- subset(fraud_data, Class == 1)
+nonfraud_cases <- subset(fraud_data, Class == 0)
+
+## Step 2: Take the sample of 50000 non-Fraud cases.
+nonfraud_sample <- nonfraud_cases[sample(nrow(nonfraud_cases), 50000), ]
+
+## Step 3: Create a subset variable
+fraud_subset <- rbind(fraud_cases, nonfraud_sample)
+
+dim(fraud_subset)
+table(fraud_subset$Class)
+prop.table(table(fraud_subset$Class))
+```
+
+While this increases the fraud percentage by 0.8%, it also means that it stays well in line with the general percentage, wherein around than 1% of transactions are recorded as a 'fraud'. 
+
+### 5.3 Train/Test Split
+
+The dataset was partitioned into training and testing subsets using a stratified sampling approach. This ensures that the class distribution is preserved across both subsets, which is particularly important given the extreme imbalance in the dataset.
+
+A 70–30 split was adopted, where 70% of the data is used for model training and the remaining 30% is reserved for out-of-sample evaluation. This approach allows for a robust assessment of model performance while ensuring sufficient data is available for training.
+
+To further improve the stability of the results, this partitioning process is repeated multiple times in later sections. This repeated sampling framework helps reduce variance in performance estimates and provides a more reliable comparison between modelling approaches.
+
+```{r, include=FALSE}
+set.seed(44940076)
+
+train_index <- createDataPartition(fraud_subset$Class, p = 0.7, list = FALSE)
+
+train_data <- fraud_subset[train_index, ]
+test_data  <- fraud_subset[-train_index, ]
+
+dim(train_data)
+dim(test_data)
+
+prop.table(table(train_data$Class))
+prop.table(table(test_data$Class))
+```
+
+### 5.4. Create RSF Ready Train and Test Data
+
+To enable the use of a survival-based modelling framework, the dataset was restructured to include the necessary components for Random Survival Forest (RSF) modelling. Specifically, the proxy time variable and event indicator (`status`) were used to define the survival object.
+
+Since the `status` variable directly represents the fraud outcome, the original `Class` variable was removed from the modelling dataset to avoid duplication and potential leakage. This ensures that the model is trained using a consistent outcome representation.
+
+The predictor variables were retained in their original form, with the exception of the time variable when required for specific preprocessing steps such as SMOTE. This results in a dataset that is compatible with RSF modelling while maintaining alignment with the original feature space. 
+
+```{r, include=FALSE}
+library(dplyr)
+
+rsf_train <- train_data %>%
+  dplyr::select(-Class) %>%
+  mutate(
+    time = as.numeric(time),
+    status = as.numeric(status)
+  ) %>%
+  na.omit()
+
+rsf_test <- test_data %>%
+  dplyr::select(-Class) %>%
+  mutate(
+    time = as.numeric(time),
+    status = as.numeric(status)
+  ) %>%
+  na.omit()
+
+rsf_train[] <- lapply(rsf_train, function(x) {
+  if (is.character(x)) as.factor(x) else x
+})
+
+rsf_test[] <- lapply(rsf_test, function(x) {
+  if (is.character(x)) as.factor(x) else x
+})
+
+glimpse(rsf_train)
+glimpse(rsf_test)
+```
+
+This structured preparation ensures that both classification and survival-based models can be applied to a consistent dataset, enabling a fair comparison of their performance in later sections.
+
+### 5.5. Benchmarking Sample
+
+To support efficient experimentation and reduce computational overhead, a benchmarking sample of the training data is constructed. This subset allows for faster iteration during model development, particularly for computationally intensive procedures such as repeated resampling, SMOTE, and explainability methods.
+
+A fixed-size random sample of the training dataset is taken, with a maximum of 50,000 observations. This ensures that the sample remains sufficiently large to preserve the underlying data structure while enabling more efficient computation.
+
+The sampling process is performed using a fixed random seed to ensure reproducibility. Importantly, this benchmarking sample is used only for intermediate experimentation and validation, while final model evaluation is conducted on the full dataset to ensure robustness of results.
+
+```{r, include=FALSE}
+set.seed(44940076)
+
+sample_size <- min(50000, nrow(rsf_train))
+rsf_train_sample <- rsf_train[sample(nrow(rsf_train), sample_size), ]
+
+dim(rsf_train_sample)
+```
+
+### 5.6. Notes on the RSF Data Construction
+
+A proxy time index was created to enable a survival-style modelling framework. In this setup, `status` represents the fraud event indicator. Since `status` duplicates the outcome information contained in `Class`, the original `Class` variable was removed from the RSF-specific modelling data to avoid leakage and duplication. 
+
+Additionally, an optional benchmarking subset was created to support faster experimentation where required.
+
+## 6. Exploratory Data Analysis
+
+This stage will involve analysing the working dataset.
+
+### 6.1. Class Distribution in the Working Dataset
+
+```{r, echo=FALSE}
+fraud_subset %>%
+  count(Class) %>%
+  ggplot(aes(x = factor(Class), y = n)) +
+  geom_col() +
+  labs(
+    title = "Class Distribution in Working Dataset",
+    x = "Class (0 = Non-Fraud, 1 = Fraud)",
+    y = "Count"
+  )
+```
+
+As previously established, there is an extreme class imbalance that exists in the dataset. The nature of this imbalance can be felt in the above visual.
+
+### 6.2. Distribution of Transaction Amount
+
+```{r, echo=FALSE}
+ggplot(fraud_subset, aes(x = Amount)) +
+  geom_histogram(bins = 50) +
+  labs(
+    title = "Distribution of Transaction Amount",
+    x = "Transaction Amount",
+    y = "Frequency"
+  )
+```
+
+From the above, we can see that the transaction amounts are typically the small amounts. While this is true, it also shows how fraudulent transactions are predominantly low in value.
+
+### 6.3. Transaction Amount by Class
+
+```{r, echo=FALSE}
+ggplot(fraud_subset, aes(x = factor(Class), y = Amount)) +
+  geom_boxplot() +
+  labs(
+    title = "Transaction Amount by Class",
+    x = "Class",
+    y = "Transaction Amount"
+  )
+```
+
+The above shows us how the detected amounts are typically smaller, which as mentioned in the previous subsection, shows how the detected amounts are negligible amounts. This also means that people are most impacted when they least expect it.
+
+### 6.4. Transactions across Proxy Time
+
+```{r, echo=FALSE}
+ggplot(fraud_subset, aes(x = time, fill = factor(Class))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.6) +
+  labs(
+    title = "Transactions Across Proxy Time",
+    x = "Proxy Time Index",
+    y = "Count",
+    fill = "Class"
+  )
+```
+
+### 6.5. EDA Commentary
+
+* **Class Imbalance after Downsampling:** While the visualisation alone does not clearly convey the extent of the change, the class distribution shows that the fraud rate increases from approximately 0.17% in the original dataset to approximately 0.97% in the working subset. Although the dataset remains highly imbalanced, this represents a meaningful improvement that supports more stable model training while still reflecting realistic fraud prevalence levels. 
+
+* **Concentration of Fraud Cases in Proxy Time Index:** The distribution of fraud cases across the proxy time index appears relatively uniform, with no strong clustering in specific regions. However, it is important to note that the time variable is a constructed ordering index rather than a true temporal measure. As such, this observation does not imply that fraud is independent of time, but rather that no artificial ordering bias is introduced into the modelling framework.
+
+* **Transaction Amount and Class:** The distribution of transaction amounts indicates that most transactions, including fraudulent ones, occur at relatively low monetary values. This suggests that fraud detection is not limited to high-value transactions and that models must be sensitive to subtle patterns in smaller transactions. However, the presence of higher-value outliers indicates that fraud is not exclusively associated with low amounts.
+
+* **Suitability of later modelling choices:** The observed characteristics of the dataset support the use of both classification and survival-based modelling approaches. The persistent class imbalance motivates the inclusion of models that are robust to rare event detection, such as Random Forest and Random Survival Forest. Additionally, the absence of strong temporal clustering, combined with the constructed proxy time index, provides a basis for exploring a survival framework as a risk-ranking mechanism rather than a strict temporal prediction model. Together, these observations justify the comparative modelling approach adopted in later sections.
+
+## 7. Modelling Framework
+
+### 7.1. Experimental Design
+
+The modelling framework evaluates the performance of different approaches across two key dimensions:
+
+1. Model type:
+   - Logistic Regression (classification baseline)
+   - Random Survival Forest (RSF)
+
+2. Imbalance handling:
+   - Without SMOTE
+   - With SMOTE applied to the training data only
+
+This results in four model configurations:
+
+- Logistic Regression (No SMOTE)
+- Logistic Regression (SMOTE)
+- Random Survival Forest (No SMOTE)
+- Random Survival Forest (SMOTE)
+
+All models are evaluated using repeated stratified train-test splits to ensure robustness of results.
+
+### 7.2. Logistic Regression (No SMOTE)
+
+A baseline Logistic Regression model was fitted using the original imbalanced training data. No resampling techniques were applied in this setup, allowing the model to reflect standard classification behaviour under class imbalance.
+
+```{r, echo=FALSE, results='hide', warning=FALSE}
+## Step 1: Run relevant packages.
+library(caret)
+library(pROC)
+library(PRROC)
+
+## Step 2: Set the seed
+set.seed(44940076)
+
+## Step 3: Establish the number of splits
+n_splits <- 30
+
+## Step 4: Create the vectors
+lr_sens_vec  <- numeric(n_splits)
+lr_prec_vec  <- numeric(n_splits)
+lr_auc_vec   <- numeric(n_splits)
+lr_auprc_vec <- numeric(n_splits)
+
+## Step 5: Execute the Logistic Regression (No SMOTE)
+for (i in 1:n_splits) {
+  
+  # 1. Stratified 70–30 split
+  lr_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
+  
+  lr_train_data <- fraud_subset[lr_train_idx, ]
+  lr_test_data  <- fraud_subset[-lr_train_idx, ]
+  
+  # 2. Fit Logistic Regression model
+  lr_model <- glm(status ~ . - time - Class, data = lr_train_data, family = binomial)
+  
+  # 3. Predict probabilities on test set
+  lr_test_prob <- predict(lr_model, newdata = lr_test_data, type = "response")
+  
+  # 4. Convert probabilities to class predictions (threshold = 0.5)
+  lr_test_pred <- ifelse(lr_test_prob > 0.5, 1, 0)
+  
+  # 5. Confusion Matrix
+  lr_cm <- confusionMatrix(
+    factor(lr_test_pred),
+    factor(lr_test_data$status),
+    positive = "1"
+  )
+  
+  # Store metrics
+  lr_sens_vec[i] <- lr_cm$byClass["Sensitivity"]
+  lr_prec_vec[i] <- lr_cm$byClass["Precision"]
+  
+  # 6. ROC + AUC
+  lr_true_labels <- as.numeric(as.character(lr_test_data$status))
+  
+  lr_roc_obj <- roc(
+    response = lr_true_labels,
+    predictor = lr_test_prob,
+    quiet = TRUE
+  )
+  
+  lr_auc_vec[i] <- as.numeric(auc(lr_roc_obj))
+  
+  # 7. AUPRC
+  lr_pr_obj <- pr.curve(
+    scores.class0 = lr_test_prob[lr_true_labels == 1],
+    scores.class1 = lr_test_prob[lr_true_labels == 0],
+    curve = FALSE
+  )
+  
+  lr_auprc_vec[i] <- lr_pr_obj$auc.integral
+}
+```
+
+### 7.3. Logistic Regression (SMOTE)
+
+This model is used to assess whether synthetic balancing improves classification performance under extreme class imbalance. To address class imbalance, SMOTE was applied to the training data only. Synthetic minority samples were generated based on the feature space, while the test set remained untouched to preserve a realistic evaluation setting. The time variable was excluded from SMOTE generation to avoid introducing artificial temporal structure into the data.
+
+```{r, echo=FALSE, results='hide', warning=FALSE}
+## Step 1: Run relevant packages.
+library(caret)
+library(dplyr)
+library(smotefamily)
+library(pROC)
+library(PRROC)
+
+## Step 2: Set the seed
+set.seed(44940076)
+
+## Step 3: Establish the number of splits
+n_splits <- 30
+
+## Step 4: Create the vectors
+lr_smote_sens_vec  <- numeric(n_splits)
+lr_smote_prec_vec  <- numeric(n_splits)
+lr_smote_auc_vec   <- numeric(n_splits)
+lr_smote_auprc_vec <- numeric(n_splits)
+
+## Step 5: Execute the Logistic Regression (SMOTE)
+for (i in 1:n_splits) {
+  
+  # 1. Stratified 70-30 split BEFORE SMOTE
+  lr_smote_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
+  
+  lr_smote_train_data <- fraud_subset[lr_smote_train_idx, ]
+  lr_smote_test_data  <- fraud_subset[-lr_smote_train_idx, ]
+  
+  # 2. Ensure numeric 0/1 outcome labels
+  lr_smote_train_data$status <- as.numeric(as.character(lr_smote_train_data$status))
+  lr_smote_test_data$status  <- as.numeric(as.character(lr_smote_test_data$status))
+  
+  # 3. Prepare training data for SMOTE
+  lr_smote_train_input <- lr_smote_train_data %>%
+    dplyr::select(-time, -Class)
+  
+  lr_smote_x_train <- lr_smote_train_input %>%
+    dplyr::select(-status)
+  
+  lr_smote_y_train <- lr_smote_train_input$status
+  
+  # 4. Choose SMOTE neighbourhood size safely
+  lr_smote_n_min <- min(table(lr_smote_y_train))
+  lr_smote_k_use <- min(5, max(1, lr_smote_n_min - 1))
+  
+  # 5. Apply SMOTE to training data only
+  lr_smote_output <- SMOTE(
+    X = lr_smote_x_train,
+    target = lr_smote_y_train,
+    K = lr_smote_k_use,
+    dup_size = 3
+  )
+  
+  lr_smote_train_balanced <- lr_smote_output$data
+  lr_smote_train_balanced$status <- as.numeric(as.character(lr_smote_train_balanced$class))
+  lr_smote_train_balanced$class <- NULL
+  
+  # 6. Fit Logistic Regression on SMOTE-balanced training data
+  lr_smote_model <- glm(
+    status ~ .,
+    data = lr_smote_train_balanced,
+    family = binomial
+  )
+  
+  # 7. Predict on untouched test data
+  lr_smote_test_prob <- predict(
+    lr_smote_model,
+    newdata = lr_smote_test_data,
+    type = "response"
+  )
+  
+  lr_smote_test_pred <- ifelse(lr_smote_test_prob > 0.5, 1, 0)
+  
+  # 8. Confusion matrix
+  lr_smote_cm <- confusionMatrix(
+    factor(lr_smote_test_pred),
+    factor(lr_smote_test_data$status),
+    positive = "1"
+  )
+  
+  lr_smote_sens_vec[i] <- lr_smote_cm$byClass["Sensitivity"]
+  lr_smote_prec_vec[i] <- lr_smote_cm$byClass["Precision"]
+  
+  # 9. ROC + AUC
+  lr_smote_roc_obj <- roc(
+    response = lr_smote_test_data$status,
+    predictor = lr_smote_test_prob,
+    quiet = TRUE
+  )
+  
+  lr_smote_auc_vec[i] <- as.numeric(auc(lr_smote_roc_obj))
+  
+  # 10. AUPRC
+  lr_smote_true_labels <- lr_smote_test_data$status
+  
+  lr_smote_keep <- is.finite(lr_smote_test_prob) & is.finite(lr_smote_true_labels)
+  lr_smote_scores <- lr_smote_test_prob[lr_smote_keep]
+  lr_smote_labels <- lr_smote_true_labels[lr_smote_keep]
+  
+  lr_smote_pr_obj <- pr.curve(
+    scores.class0 = lr_smote_scores[lr_smote_labels == 1],
+    scores.class1 = lr_smote_scores[lr_smote_labels == 0],
+    curve = FALSE
+  )
+  
+  lr_smote_auprc_vec[i] <- lr_smote_pr_obj$auc.integral
+}
+```
+
+### 7.4. Random Survival Forest (No SMOTE)
+
+A Random Survival Forest (RSF) model was fitted using the survival representation of the data. The model leverages the proxy time index and event indicator to produce a risk-based prediction. No resampling was applied in this configuration, allowing assessment of RSF performance under naturally imbalanced conditions.
+
+```{r, echo=FALSE, results='hide'}
+## Step 1: Run relevant packages.
+library(caret)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
+
+## Step 2: Set the seed
+set.seed(44940076)
+
+## Step 3: Establish the number of splits
+n_splits <- 30
+
+## Step 4: Create the vectors
+rsf_sens_vec  <- numeric(n_splits)
+rsf_prec_vec  <- numeric(n_splits)
+rsf_auc_vec   <- numeric(n_splits)
+rsf_auprc_vec <- numeric(n_splits)
+
+## Step 5: Execute the RSF (No SMOTE)
+for (i in 1:n_splits) {
+  
+  # 1. Stratified 70-30 split
+  rsf_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
+  
+  rsf_train_data <- fraud_subset[rsf_train_idx, ]
+  rsf_test_data  <- fraud_subset[-rsf_train_idx, ]
+  
+  # 2. Keep only RSF-relevant variables
+  rsf_train_data <- rsf_train_data %>%
+    dplyr::select(-Class)
+  
+  rsf_test_data <- rsf_test_data %>%
+    dplyr::select(-Class)
+  
+  # 3. Ensure numeric 0/1 outcome
+  rsf_train_data$status <- as.numeric(as.character(rsf_train_data$status))
+  rsf_test_data$status  <- as.numeric(as.character(rsf_test_data$status))
+  
+  # 4. Fit RSF model
+  rsf_model <- rfsrc(
+    Surv(time, status) ~ .,
+    data = rsf_train_data,
+    ntree = 100,
+    nodesize = 15,
+    splitrule = "logrank",
+    nthread = 1,
+    fast = TRUE
+  )
+  
+  # 5. Predict on test data using expected predictors only
+  rsf_test_x <- rsf_test_data[, rsf_model$xvar.names, drop = FALSE]
+  rsf_pred <- predict(rsf_model, newdata = rsf_test_x)
+  
+  # 6. Compute risk score: 1 - S(tmax)
+  rsf_risk <- 1 - rsf_pred$survival[, ncol(rsf_pred$survival)]
+  rsf_risk <- as.numeric(rsf_risk)
+  
+  stopifnot(length(rsf_risk) == nrow(rsf_test_data))
+  
+  # 7. Convert risk score to class prediction using median threshold
+  rsf_threshold <- median(rsf_risk)
+  rsf_test_pred <- ifelse(rsf_risk > rsf_threshold, 1, 0)
+  
+  # 8. Confusion matrix
+  rsf_cm <- confusionMatrix(
+    factor(rsf_test_pred),
+    factor(rsf_test_data$status),
+    positive = "1"
+  )
+  
+  rsf_sens_vec[i] <- rsf_cm$byClass["Sensitivity"]
+  rsf_prec_vec[i] <- rsf_cm$byClass["Precision"]
+  
+  # 9. ROC + AUC
+  rsf_roc_obj <- roc(
+    response = rsf_test_data$status,
+    predictor = rsf_risk,
+    quiet = TRUE
+  )
+  
+  rsf_auc_vec[i] <- as.numeric(auc(rsf_roc_obj))
+  
+  # 10. AUPRC
+  rsf_true_labels <- rsf_test_data$status
+  
+  rsf_keep <- is.finite(rsf_risk) & is.finite(rsf_true_labels)
+  rsf_scores <- rsf_risk[rsf_keep]
+  rsf_labels <- rsf_true_labels[rsf_keep]
+  
+  rsf_pr_obj <- pr.curve(
+    scores.class0 = rsf_scores[rsf_labels == 1],
+    scores.class1 = rsf_scores[rsf_labels == 0],
+    curve = FALSE
+  )
+  
+  rsf_auprc_vec[i] <- rsf_pr_obj$auc.integral
+}
+```
+
+
+### 7.5. Random Survival Forest (SMOTE)
+
+SMOTE was applied to the training data to address class imbalance prior to fitting the RSF model. Since SMOTE does not generate survival times, a resampling approach was used to assign time values to synthetic observations based on the empirical distribution of the original data.
+
+Specifically:
+* SMOTE was applied to the feature space excluding the time variable
+
+* Synthetic observations were generated for the minority class
+
+* Time values were reassigned via sampling from the observed class-specific time distributions
+
+This approach allows RSF to be trained on a balanced dataset, while acknowledging that the survival times of synthetic observations are approximations rather than true event times.
+
+```{r, echo=FALSE, results='hide'}
+## Step 1: Run relevant packages.
+library(caret)
+library(smotefamily)
+library(dplyr)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
+
+## Step 2: Set the seed
+set.seed(44940076)
+
+## Step 3: Establish the number of splits
+n_splits <- 30
+
+## Step 4: Create the vectors
+rsf_smote_sens_vec  <- numeric(n_splits)
+rsf_smote_prec_vec  <- numeric(n_splits)
+rsf_smote_auc_vec   <- numeric(n_splits)
+rsf_smote_auprc_vec <- numeric(n_splits)
+
+## Step 5: Execute the RSF (SMOTE)
+for (i in 1:n_splits) {
+  
+  # 1. Stratified 70-30 split BEFORE SMOTE
+  rsf_smote_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
+  
+  rsf_smote_train_data <- fraud_subset[rsf_smote_train_idx, ]
+  rsf_smote_test_data  <- fraud_subset[-rsf_smote_train_idx, ]
+  
+  # 2. Remove duplicate target column and ensure numeric status
+  rsf_smote_train_data <- rsf_smote_train_data %>%
+    dplyr::select(-Class)
+  
+  rsf_smote_test_data <- rsf_smote_test_data %>%
+    dplyr::select(-Class)
+  
+  rsf_smote_train_data$status <- as.numeric(as.character(rsf_smote_train_data$status))
+  rsf_smote_test_data$status  <- as.numeric(as.character(rsf_smote_test_data$status))
+  
+  # 3. Prepare inputs for SMOTE (exclude time)
+  rsf_smote_x_train <- rsf_smote_train_data %>%
+    dplyr::select(-status, -time)
+  
+  rsf_smote_y_train <- rsf_smote_train_data$status
+  
+  # 4. Choose SMOTE neighbourhood size safely
+  rsf_smote_n_min <- min(table(rsf_smote_y_train))
+  rsf_smote_k_use <- min(5, max(1, rsf_smote_n_min - 1))
+  
+  # 5. Apply SMOTE to training data only
+  rsf_smote_output <- SMOTE(
+    X = rsf_smote_x_train,
+    target = rsf_smote_y_train,
+    K = rsf_smote_k_use,
+    dup_size = 3
+  )
+  
+  rsf_smote_train_balanced <- rsf_smote_output$data
+  rsf_smote_train_balanced$status <- as.numeric(as.character(rsf_smote_train_balanced$class))
+  rsf_smote_train_balanced$class <- NULL
+  
+  # 6. Reattach empirical time values
+  rsf_smote_train_balanced$time <- NA_real_
+  
+  rsf_smote_idx0 <- which(rsf_smote_train_balanced$status == 0)
+  rsf_smote_idx1 <- which(rsf_smote_train_balanced$status == 1)
+  
+  rsf_smote_train_balanced$time[rsf_smote_idx0] <- sample(
+    rsf_smote_train_data$time[rsf_smote_train_data$status == 0],
+    length(rsf_smote_idx0),
+    replace = TRUE
+  )
+  
+  rsf_smote_train_balanced$time[rsf_smote_idx1] <- sample(
+    rsf_smote_train_data$time[rsf_smote_train_data$status == 1],
+    length(rsf_smote_idx1),
+    replace = TRUE
+  )
+  
+  # 7. Fit RSF on SMOTE-balanced training data
+  rsf_smote_model <- rfsrc(
+    Surv(time, status) ~ .,
+    data = rsf_smote_train_balanced,
+    ntree = 100,
+    nodesize = 15,
+    splitrule = "logrank",
+    nthread = 1,
+    fast = TRUE
+  )
+  
+  # 8. Predict on untouched test data
+  rsf_smote_test_x <- rsf_smote_test_data[, rsf_smote_model$xvar.names, drop = FALSE]
+  rsf_smote_pred <- predict(rsf_smote_model, newdata = rsf_smote_test_x)
+  
+  # 9. Compute risk score: 1 - S(tmax)
+  rsf_smote_risk <- 1 - rsf_smote_pred$survival[, ncol(rsf_smote_pred$survival)]
+  rsf_smote_risk <- as.numeric(rsf_smote_risk)
+  
+  stopifnot(length(rsf_smote_risk) == nrow(rsf_smote_test_data))
+  
+  # 10. Convert risk score to class prediction using median threshold
+  rsf_smote_threshold <- median(rsf_smote_risk)
+  rsf_smote_test_pred <- ifelse(rsf_smote_risk > rsf_smote_threshold, 1, 0)
+  
+  # 11. Confusion matrix
+  rsf_smote_cm <- confusionMatrix(
+    factor(rsf_smote_test_pred),
+    factor(rsf_smote_test_data$status),
+    positive = "1"
+  )
+  
+  rsf_smote_sens_vec[i] <- rsf_smote_cm$byClass["Sensitivity"]
+  rsf_smote_prec_vec[i] <- rsf_smote_cm$byClass["Precision"]
+  
+  # 12. ROC + AUC
+  rsf_smote_roc_obj <- roc(
+    response = rsf_smote_test_data$status,
+    predictor = rsf_smote_risk,
+    quiet = TRUE
+  )
+  
+  rsf_smote_auc_vec[i] <- as.numeric(auc(rsf_smote_roc_obj))
+  
+  # 13. AUPRC
+  rsf_smote_true_labels <- rsf_smote_test_data$status
+  
+  rsf_smote_keep <- is.finite(rsf_smote_risk) & is.finite(rsf_smote_true_labels)
+  rsf_smote_scores <- rsf_smote_risk[rsf_smote_keep]
+  rsf_smote_labels <- rsf_smote_true_labels[rsf_smote_keep]
+  
+  rsf_smote_pr_obj <- pr.curve(
+    scores.class0 = rsf_smote_scores[rsf_smote_labels == 1],
+    scores.class1 = rsf_smote_scores[rsf_smote_labels == 0],
+    curve = FALSE
+  )
+  
+  rsf_smote_auprc_vec[i] <- rsf_smote_pr_obj$auc.integral
+}
+```
+
+
+## 8. Results
+
+This section presents the performance of all four model configurations:
+
+* Logistic Regression (No SMOTE)
+
+* Logistic Regression (SMOTE)
+
+* Random Survival Forest (No SMOTE)
+
+* Random Survival Forest (SMOTE)
+
+All results are reported as the mean and standard deviation across 30 repeated stratified train-test splits.
+
+### 8.1. Evaluation Metrics
+
+The following metrics were used to evaluate model performance:
+
+* Sensitivity (Recall)
+
+* Precision
+
+* AUC (ROC)
+
+* AUPRC (Precision-Recall)
+
+All metrics were averaged across repeated train-test splits.
+
+```{r, echo=FALSE}
+# LR (No SMOTE)
+results_lr_no_smote <- data.frame(
+  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
+  Mean = c(
+    mean(lr_sens_vec),
+    mean(lr_prec_vec),
+    mean(lr_auc_vec),
+    mean(lr_auprc_vec)
+  ),
+  SD = c(
+    sd(lr_sens_vec),
+    sd(lr_prec_vec),
+    sd(lr_auc_vec),
+    sd(lr_auprc_vec)
+  )
+)
+
+# LR (SMOTE)
+results_lr_smote <- data.frame(
+  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
+  Mean = c(
+    mean(lr_smote_sens_vec),
+    mean(lr_smote_prec_vec),
+    mean(lr_smote_auc_vec),
+    mean(lr_smote_auprc_vec)
+  ),
+  SD = c(
+    sd(lr_smote_sens_vec),
+    sd(lr_smote_prec_vec),
+    sd(lr_smote_auc_vec),
+    sd(lr_smote_auprc_vec)
+  )
+)
+
+# RSF (No SMOTE)
+results_rsf_no_smote <- data.frame(
+  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
+  Mean = c(
+    mean(rsf_sens_vec),
+    mean(rsf_prec_vec),
+    mean(rsf_auc_vec),
+    mean(rsf_auprc_vec)
+  ),
+  SD = c(
+    sd(rsf_sens_vec),
+    sd(rsf_prec_vec),
+    sd(rsf_auc_vec),
+    sd(rsf_auprc_vec)
+  )
+)
+
+# RSF (SMOTE)
+results_rsf_smote <- data.frame(
+  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
+  Mean = c(
+    mean(rsf_smote_sens_vec),
+    mean(rsf_smote_prec_vec),
+    mean(rsf_smote_auc_vec),
+    mean(rsf_smote_auprc_vec)
+  ),
+  SD = c(
+    sd(rsf_smote_sens_vec),
+    sd(rsf_smote_prec_vec),
+    sd(rsf_smote_auc_vec),
+    sd(rsf_smote_auprc_vec)
+  )
+)
+```
+
+### 8.2. Logistic Regression Results
+
+```{r, echo=FALSE}
+library(pander)
+
+## Logistic Regression (No SMOTE)
+pander(results_lr_no_smote, digits = 6, caption = "Table 1: Logistic Regression (No SMOTE) Performance Metrics")
+
+## Logistic Regression (SMOTE)
+pander(results_lr_smote, digits = 6, caption = "Table 2: Logistic Regression (SMOTE) Performance Metrics")
+```
+
+**Observations:** The Logistic Regression model demonstrates moderate performance across all metrics. The introduction of SMOTE improves sensitivity, indicating an increased ability to detect fraudulent transactions. However, this improvement is accompanied by a reduction in precision, suggesting a higher rate of false positives.
+
+
+### 8.3. Random Survival Forest Results
+
+```{r, echo=FALSE}
+library(pander)
+
+## Random Survival Forest (No SMOTE)
+pander(results_rsf_no_smote, digits = 6, caption = "Table 3: Random Survival Forest (No SMOTE) Performance Metrics")
+
+## Random Survival Forest (SMOTE)
+pander(results_rsf_smote, digits = 6, caption = "Table 4: Random Survival Forest (SMOTE) Performance Metrics")
+```
+
+**Observations:** The RSF model achieves consistently high sensitivity across both configurations, indicating strong capability in identifying fraudulent transactions. However, this is associated with lower precision, reflecting a trade-off where a larger number of transactions are flagged to minimise missed fraud cases.
+
+### 8.4. Comparative Summary
+
+Across all models, clear differences emerge in performance characteristics. Logistic Regression provides a stable baseline but is sensitive to class imbalance. The use of SMOTE improves detection performance, particularly in terms of sensitivity.
+
+In contrast, the RSF model demonstrates superior sensitivity, suggesting that a risk-based modelling approach may be more effective for identifying fraudulent transactions. However, this comes at the cost of lower precision, highlighting the trade-off between detection and false positives.
+
+```{r, echo=FALSE}
+library(dplyr)
+
+combined_results <- bind_rows(
+  mutate(results_lr_no_smote, Model = "LR", SMOTE = "No"),
+  mutate(results_lr_smote, Model = "LR", SMOTE = "Yes"),
+  mutate(results_rsf_no_smote, Model = "RSF", SMOTE = "No"),
+  mutate(results_rsf_smote, Model = "RSF", SMOTE = "Yes")
+)
+
+combined_results
+```
+
+The results of this study highlight the following key findings:
+
+- SMOTE improves sensitivity across all models, confirming its effectiveness in addressing class imbalance.
+- Logistic Regression provides a stable baseline but is sensitive to imbalance effects.
+- The RSF model achieves consistently high sensitivity, indicating strong fraud detection capability.
+- The combination of RSF and SMOTE yields strong overall performance, particularly in terms of ranking and recall.
+- A trade-off between sensitivity and precision is observed across all models.
+
+### 8.5. Visual Comparison
+
+To compare model performance more clearly, two summary plots are presented below. The first focuses on AUPRC, which is especially informative under severe class imbalance. The second focuses on sensitivity, reflecting the ability of each model to correctly identify fraudulent transactions.
+
+#### 8.5.1. AUPRC Comparison
+
+```{r, echo=FALSE, fig.align='center', fig.width=7, fig.height=5}
+library(ggplot2)
+
+df_auprc <- data.frame(
+  Model = c("RSF (SMOTE)", "RSF (No SMOTE)", "LR (SMOTE)", "LR (No SMOTE)"),
+  AUPRC = c(
+    results_rsf_smote$Mean[results_rsf_smote$Metric == "AUPRC"],
+    results_rsf_no_smote$Mean[results_rsf_no_smote$Metric == "AUPRC"],
+    results_lr_smote$Mean[results_lr_smote$Metric == "AUPRC"],
+    results_lr_no_smote$Mean[results_lr_no_smote$Metric == "AUPRC"]
+  ),
+  SD = c(
+    results_rsf_smote$SD[results_rsf_smote$Metric == "AUPRC"],
+    results_rsf_no_smote$SD[results_rsf_no_smote$Metric == "AUPRC"],
+    results_lr_smote$SD[results_lr_smote$Metric == "AUPRC"],
+    results_lr_no_smote$SD[results_lr_no_smote$Metric == "AUPRC"]
+  )
+)
+
+df_auprc$Model <- factor(
+  df_auprc$Model,
+  levels = c("RSF (SMOTE)", "LR (No SMOTE)", "LR (SMOTE)", "RSF (No SMOTE)")
+)
+
+df_auprc$Highlight <- ifelse(df_auprc$Model == "RSF (SMOTE)", "Best", "Other")
+
+ggplot(df_auprc, aes(x = Model, y = AUPRC, color = Highlight)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = AUPRC - SD, ymax = AUPRC + SD),
+    width = 0.15
+  ) +
+  scale_color_manual(values = c("Best" = "firebrick2", "Other" = "grey30")) +
+  coord_flip() +
+  labs(
+    x = "Model",
+    y = "AUPRC",
+    title = "Ranking Performance under Extreme Class Imbalance"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    panel.grid.major = element_line(color = "grey95"),
+    panel.grid.minor = element_line(color = "grey95"),
+    legend.position = "none"
+  )
+```
+
+The AUPRC comparative highlights the ranking performance of each model under extreme class imbalance. This metric is particularly important in fraud detection because it places emphasis on the model’s ability to prioritise true fraud cases without being overly influenced by the dominant non-fraud class. The results suggest that the RSF model with SMOTE achieves the strongest ranking performance overall.
+
+#### 8.5.2. Sensitivity Comparison
+
+Below is the outline of the Sensitivity plot.
+
+```{r, echo=FALSE, fig.align='center', fig.width=7, fig.height=5}
+df_sens <- data.frame(
+  Model = c("RSF (SMOTE)", "RSF (No SMOTE)", "LR (SMOTE)", "LR (No SMOTE)"),
+  Sensitivity = c(
+    results_rsf_smote$Mean[results_rsf_smote$Metric == "Sensitivity"],
+    results_rsf_no_smote$Mean[results_rsf_no_smote$Metric == "Sensitivity"],
+    results_lr_smote$Mean[results_lr_smote$Metric == "Sensitivity"],
+    results_lr_no_smote$Mean[results_lr_no_smote$Metric == "Sensitivity"]
+  )
+)
+
+df_sens$Model <- factor(
+  df_sens$Model,
+  levels = c("RSF (SMOTE)", "RSF (No SMOTE)", "LR (SMOTE)", "LR (No SMOTE)")
+)
+
+df_sens$Highlight <- ifelse(df_sens$Model == "RSF (SMOTE)", "Best", "Other")
+
+ggplot(df_sens, aes(x = Model, y = Sensitivity, fill = Highlight)) +
+  geom_col(width = 0.7) +
+  geom_text(
+    aes(label = sprintf("%.3f", Sensitivity)),
+    hjust = -0.1,
+    size = 4,
+    color = "black"
+  ) +
+  coord_flip() +
+  scale_fill_manual(values = c("Best" = "firebrick3", "Other" = "grey75")) +
+  scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "Sensitivity (Proactive Fraud Detection)",
+    x = "Model",
+    y = "Sensitivity (Recall)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black")
+  )
+```
+
+The sensitivity plot shows that the RSF-based approaches achieve the strongest recall, indicating that they are more effective at identifying fraudulent cases. This is important in fraud detection settings where missing a fraud event may be more costly than raising additional false positives. By contrast, the Logistic Regression models show lower sensitivity, particularly without SMOTE, suggesting that class imbalance has a stronger negative effect on standard classification performance.
+
+
+## 9. Explainability
+
+### 9.1 Why Explainability Matters in Fraud Detection
+
+In fraud detection, model performance alone is not sufficient. Banking environments require models that are not only effective, but also interpretable. Explanations are important for several reasons: they help analysts understand why a transaction has been flagged, support internal validation and governance processes, and improve confidence in model-assisted decision-making.
+
+This is particularly relevant in the present study, where the Random Survival Forest produces a risk-based score rather than a simple class probability. Explainability methods therefore help connect the model output to transaction-level reasoning.
+
+### 9.2 Global Explainability
+
+Global explainability provides an overall view of which predictors contribute most strongly to the model’s behaviour across the dataset. This is useful for identifying broad fraud-related patterns and determining whether the model is relying on a concentrated set of meaningful features.
+
+### 9.3 Local Explainability using SHAP
+
+While global importance identifies which variables matter overall, SHAP provides a local explanation for a single transaction. This allows the contribution of each feature to the RSF risk score to be decomposed at the transaction level. In this study, SHAP is applied to the RSF model with SMOTE in order to examine how individual predictors increase or decrease the estimated fraud risk for a selected observation.
+
+```{r, echo=FALSE}
+library(iml)
+library(dplyr)
+
+# Prediction wrapper for RSF risk score
+predict_rsf_risk <- function(model, newdata) {
+  pred_obj <- predict(model, newdata = newdata)
+  risk_score <- 1 - pred_obj$survival[, ncol(pred_obj$survival)]
+  as.numeric(risk_score)
+}
+
+# Training data used for explanation
+rsf_shap_x_train <- rsf_smote_train_balanced %>%
+  dplyr::select(-status, -time)
+
+rsf_shap_y_train <- rsf_smote_train_balanced$status
+
+# Predictor object for iml
+predictor_rsf <- Predictor$new(
+  model = rsf_smote_model,
+  data = rsf_shap_x_train,
+  y = rsf_shap_y_train,
+  predict.function = predict_rsf_risk
+)
+
+# Observation of interest
+rsf_shap_x_interest <- test_data %>%
+  dplyr::select(colnames(rsf_shap_x_train)) %>%
+  slice(1)
+
+# Shapley explanation
+rsf_shapley <- Shapley$new(
+  predictor_rsf,
+  x.interest = rsf_shap_x_interest
+)
+
+plot(rsf_shapley)
+```
+
+The SHAP explanation shows how the selected transaction’s risk score is built up from individual feature contributions. Positive contributions move the transaction toward higher estimated fraud risk, while negative contributions move it toward lower estimated risk.
+
+From a banking perspective, this is useful because it mirrors the logic of case investigation. Rather than receiving only a risk score, an analyst can see which characteristics of the transaction most strongly influenced the model’s assessment.
+
+### 9.4 Local Explainability using LIME
+
+Local Interpretable Model-agnostic Explanations (LIME) provides a second local explanation framework by approximating the model decision around a selected transaction with a simpler interpretable representation. In this study, LIME is used to complement SHAP by showing which features most strongly support the local fraud classification for an individual case. 
+
+```{r, echo=FALSE, warning=FALSE}
+library(dplyr)
+library(lime)
+
+# Features used by the model
+rsf_lime_x_train <- rsf_smote_train_balanced %>%
+  dplyr::select(-status, -time)
+
+rsf_lime_x_test <- rsf_smote_test_data  %>%
+  dplyr::select(colnames(rsf_lime_x_train))
+
+rsf_lime_y_train <- rsf_smote_train_balanced$status
+
+# RSF risk score function
+predict_rsf_risk <- function(model, newdata) {
+  pred_obj <- predict(model, newdata = newdata)
+  risk_score <- 1 - pred_obj$survival[, ncol(pred_obj$survival)]
+  as.numeric(risk_score)
+}
+
+# Logistic calibration of RSF risk score
+train_risk <- predict_rsf_risk(rsf_smote_model, rsf_lime_x_train)
+cal_model <- glm(rsf_lime_y_train ~ train_risk, family = binomial)
+
+predict_proba_rsf <- function(newdata) {
+  r <- predict_rsf_risk(rsf_smote_model, newdata)
+  p1 <- as.numeric(
+    predict(cal_model, newdata = data.frame(train_risk = r), type = "response")
+  )
+  data.frame("0" = 1 - p1, "1" = p1)
+}
+
+# Required methods for lime
+model_type.rfsrc <- function(x, ...) "classification"
+
+predict_model.rfsrc <- function(x, newdata, type, ...) {
+  predict_proba_rsf(newdata)
+}
+
+# LIME explainer
+explainer <- lime(
+  x = rsf_lime_x_train,
+  model = rsf_smote_model,
+  bin_continuous = TRUE
+)
+
+# Observation of interest
+set.seed(44940076)
+rsf_lime_x_interest <- rsf_lime_x_test %>%
+  slice(1)
+
+# Generate explanation
+lime_explanation <- explain(
+  x = rsf_lime_x_interest,
+  explainer = explainer,
+  n_features = 8,
+  n_labels = 1
+)
+
+plot_features(lime_explanation)
+```
+LIME provides a complementary local explanation framework by approximating the behaviour of the RSF model in the neighbourhood of a selected transaction using a simpler, interpretable model. This allows the contribution of a small number of features to be expressed in a linear and human-readable form.
+
+The LIME output shows both positive and negative contributions. Features with positive weights increase the likelihood of the transaction being classified as fraudulent, while those with negative weights reduce it. This provides a directional explanation of the decision, rather than simply identifying important variables.
+
+While SHAP provides a theoretically grounded decomposition of the prediction, LIME offers a simpler and more interpretable local approximation. The two methods therefore complement each other, with SHAP emphasising consistency and LIME emphasising interpretability.
+
+From a banking perspective, this type of explanation aligns closely with how fraud analysts review cases. This directional interpretation allows analysts to understand not only which features matter, but how they influence the model’s decision. This supports faster investigation and more informed decision-making.
+
+However, it is important to note that LIME explanations are based on a local approximation of the model and may not fully capture complex interactions present in the RSF model. As a result, explanations should be interpreted as indicative rather than exact.
+
+### 9.5 Banking Relevance of Explainability
+
+The explainability results strengthen the practical relevance of the modelling framework. In a banking environment, fraud detection systems are not used in isolation - they support fraud operations teams who must review alerts, prioritise investigations, and justify intervention decisions.
+
+Global explainability helps identify the broad drivers of suspicious behaviour across the portfolio, while local explanation methods such as SHAP and LIME provide transaction-level insight into why a case was flagged. This is particularly valuable for analyst workflows, model governance, and customer-facing situations where a flagged transaction may require review or escalation.
+
+More broadly, the inclusion of explainability addresses one of the key limitations of black-box fraud models. Rather than producing only a ranked risk score, the framework developed in this study also provides a mechanism for understanding how that score was formed.
+
+
+## 10. Discussion
+
+### 10.1. Model Performance Comparison
+
+The results show that both model choice and imbalance handling significantly influence fraud detection performance. Logistic regression provides a strong baseline, but is sensitive to class imbalance. The introduction of SMOTE however, improves sensitivity, though it is at the expense of precision.
+
+In contrast, the Random Survival Forest (RSF) demonstrates consistently strong sensitivity, indicating a survival-based risk framework may be more effective in identifying fraudulent transactions.
+
+### 10.2. Classification vs Survival 
+
+A key distinction in this study lies in probability-based classification and risk-based survival modelling. Classification models estimate the probability that a transaction is fraudulent, whereas the RSF model estimates the relative risk of a fraud occurrence. This allows transactions to be ranked, rather than simply being classified.
+
+This ranking-based approach aligns more closely with real-world fraud detection systems, where the prioritisation of high-risk transactions are often more important than binary classification.
+
+### 10.3. Impact of SMOTE
+
+SMOTE improves the sensitivity across both modelling approaches, confirming its effectiveness in handling class imbalance. However, its use in survival modelling introduces additional considerations, as synthetic observations do not naturally include time-to-event information relevant to modelling. As a result, this highlights a trade-off between improved detection performance and methodological consistency.
+
+### 10.4 Role of Explainability
+
+The inclusion of SHAP and LIME strengthens the interpretability of the modelling framework. While the RSF introduces a more complex, risk-based approach, the explainability techniques allow this complexity to be translated into meaningful transaction-level insights.
+
+This is particularly important in fraud detection, since model outputs must be interpretable for operational and governance processes. 
+
+## 11. Banking Implications
+
+### 11.1. Fraud Detection Operations
+
+In practical banking environments, fraud detection systems must balance detection accuracy with operational efficiency. High sensitivity is particularly valuable, since missed fraudulent transactions have significant financial and reputational consequences to both financial institutions and its customers. 
+
+### 11.2. Risk Prioritisation
+
+The RSF model enables transactions to be ranked by risk, allowing fraud teams to prioritise investigations. This is especially important in high-volume settings where this is not feasible to review all transactions manually. Hence, this ranking-based approach aligns closely with real-world fraud detection workflows. 
+
+### 11.3. Explainability and Trust
+
+Explainability techniques such as SHAP and LIME provide transparency into model decisions, supporting analyst understanding and regulatory compliance. This helps build trust in model-assisted decision-making and supports effective deployment in banking environments. 
+
+## 12. Limitations
+
+This study had several limitations, namely:
+
+- The time variable used in the survival framework is a proxy, rather than a true temporal measure.
+- SMOTE does not generate survival times, requiring synthetic assignment of the time values.
+- Downsampling reduces the level of representation that the original dataset contains.
+- RSF classification requires a threshold, which is chosen through experimentation.
+- Explainability results are demonstrated on a limited number of observations.
+
+## 13. Conclusion
+
+This study compared classification and survival-based modelling approaches to fraud detection under extreme class imbalance. The results themselves show that:
+
+- SMOTE improves sensitivity across models
+- RSF provides a strong risk-based alternative to classification
+- RSF combined with SMOTE achieves strong detection performance
+
+More importantly, the survival-based framework introduces a ranking perspective that aligns more closely with real-world fraud detection systems. The inclusion of explainability techniques further enhances the practical applicability of the approach. 
+
+Future work should focus on improving temporal modelling and extendng explainability to broader transaction sets. 
