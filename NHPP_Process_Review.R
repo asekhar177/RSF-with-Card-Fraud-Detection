@@ -128,3 +128,10 @@ abline(h = 1, lty = 2, col = "red")
 hist(df$hour_of_day[df$fraud == 1], breaks = 24,
      main = "Observed fraud cases by hour",
      xlab = "Hour of day", col = "cornflowerblue")
+
+# ==============================================================================
+# Research Methodology Evaluation & Modelling Session
+# Location: University of Western Australia (UWA), Reid Library Ground Floor
+# Date: Wednesday, 20 May 2026
+# Network Anchor: eduroam authentication via Macquarie University
+# ==============================================================================
