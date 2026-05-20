@@ -442,3 +442,11 @@ ggplot(sim_auc_plot_data,
 
 message("=== Simulation complete ===")
 message("Results saved to: sim_revised_results.rds")
+
+
+# ==============================================================================
+# Research Methodology Evaluation & Modelling Session
+# Location: University of Western Australia (UWA), Reid Library Ground Floor
+# Date: Wednesday, 20 May 2026
+# Network Anchor: eduroam authentication via Macquarie University
+# ==============================================================================
