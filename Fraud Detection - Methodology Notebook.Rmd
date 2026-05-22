@@ -76,7 +76,10 @@ set.seed(44940076)
 ## Step 3: Load Data
 fraud_data <- read.csv('creditcard.csv', header = TRUE)
 
-## Step 4: Remove Missing Values
+## Step 4: Check for Missing Values
+colSums(is.na(fraud_data))
+
+## Step 5: Remove Missing Values
 fraud_data <- na.omit(fraud_data)
 ```
 
@@ -590,8 +593,11 @@ for (i in 1:n_splits) {
   
   stopifnot(length(rsf_risk) == nrow(rsf_test_data))
   
-  # 7. Convert risk score to class prediction using median threshold
-  rsf_threshold <- median(rsf_risk)
+  # 7. Convert risk score using 99th percentile threshold (training-based)
+  rsf_train_pred <- predict(rsf_model, newdata = rsf_train_data[, rsf_model$xvar.names, drop = FALSE])
+  rsf_train_risk <- 1 - rsf_train_pred$survival[, ncol(rsf_train_pred$survival)]
+  
+  rsf_threshold <- quantile(rsf_train_risk, 0.99)
   rsf_test_pred <- ifelse(rsf_risk > rsf_threshold, 1, 0)
   
   # 8. Confusion matrix
@@ -745,8 +751,13 @@ for (i in 1:n_splits) {
   
   stopifnot(length(rsf_smote_risk) == nrow(rsf_smote_test_data))
   
-  # 10. Convert risk score to class prediction using median threshold
-  rsf_smote_threshold <- median(rsf_smote_risk)
+  # 10. Convert risk score using 99th percentile threshold (training-based)
+  rsf_smote_train_pred <- predict(rsf_smote_model,
+                                  newdata = rsf_smote_train_data[, rsf_smote_model$xvar.names, drop = FALSE]
+                                  )
+
+  rsf_smote_train_risk <- 1 - rsf_smote_train_pred$survival[, ncol(rsf_smote_train_pred$survival)]
+  rsf_smote_threshold <- quantile(rsf_smote_train_risk, 0.99)
   rsf_smote_test_pred <- ifelse(rsf_smote_risk > rsf_smote_threshold, 1, 0)
   
   # 11. Confusion matrix
