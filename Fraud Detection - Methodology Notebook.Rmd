@@ -94,7 +94,7 @@ Good, this means that there is nothing much to worry about from the missingness 
 
 ### 3.3. Structure and Dimensions
 
-This next step will involve udnerstanding the structure and dimensions, such that we are able to understand the specifics of the data we are dealing with.
+This next step will involve understanding the structure and dimensions, such that we are able to understand the specifics of the data we are dealing with.
 
 ```{r, echo=FALSE}
 dim(fraud_data)
@@ -141,7 +141,7 @@ fraud_data$status <- fraud_data$Class     # Event indicator: 1 = fraud, 0 = non-
 
 ### 5.2. Downsample Majority Class for Computational Efficiency
 
-The original dataset is highly imbalanced and computationally large. To make this more robust, all fraud cases were retained, while a random sample of 50000 non-fraud cases were selected. This preserves the minority class of the substantiative interest while reducing the runtime and memory burden of subsequent modelling work. This is what we call **downsampling**.
+The original dataset is highly imbalanced and computationally large. To make this more robust, all fraud cases were retained, while a random sample of 50000 non-fraud cases were selected. This preserves the minority class of the substantive interest while reducing the runtime and memory burden of subsequent modelling work. This is what we call **downsampling**.
 
 ```{r, include=FALSE}
 ## Step 1: Split 'fraud_data' into Fraud and non-Fraud subsets.
@@ -233,7 +233,7 @@ A fixed-size random sample of the training dataset is taken, with a maximum of 5
 
 The sampling process is performed using a fixed random seed to ensure reproducibility. Importantly, this benchmarking sample is used only for intermediate experimentation and validation, while final model evaluation is conducted on the full dataset to ensure robustness of results.
 
-```{r, include=FALSE}
+```{r}
 set.seed(44940076)
 
 sample_size <- min(50000, nrow(rsf_train))
@@ -254,7 +254,7 @@ This stage will involve analysing the working dataset.
 
 ### 6.1. Class Distribution in the Working Dataset
 
-```{r, echo=FALSE}
+```{r}
 fraud_subset %>%
   count(Class) %>%
   ggplot(aes(x = factor(Class), y = n)) +
@@ -270,7 +270,7 @@ As previously established, there is an extreme class imbalance that exists in th
 
 ### 6.2. Distribution of Transaction Amount
 
-```{r, echo=FALSE}
+```{r}
 ggplot(fraud_subset, aes(x = Amount)) +
   geom_histogram(bins = 50) +
   labs(
@@ -284,7 +284,7 @@ From the above, we can see that the transaction amounts are typically the small 
 
 ### 6.3. Transaction Amount by Class
 
-```{r, echo=FALSE}
+```{r}
 ggplot(fraud_subset, aes(x = factor(Class), y = Amount)) +
   geom_boxplot() +
   labs(
@@ -298,7 +298,7 @@ The above shows us how the detected amounts are typically smaller, which as ment
 
 ### 6.4. Transactions across Proxy Time
 
-```{r, echo=FALSE}
+```{r}
 ggplot(fraud_subset, aes(x = time, fill = factor(Class))) +
   geom_histogram(bins = 50, position = "identity", alpha = 0.6) +
   labs(
@@ -318,6 +318,74 @@ ggplot(fraud_subset, aes(x = time, fill = factor(Class))) +
 * **Transaction Amount and Class:** The distribution of transaction amounts indicates that most transactions, including fraudulent ones, occur at relatively low monetary values. This suggests that fraud detection is not limited to high-value transactions and that models must be sensitive to subtle patterns in smaller transactions. However, the presence of higher-value outliers indicates that fraud is not exclusively associated with low amounts.
 
 * **Suitability of later modelling choices:** The observed characteristics of the dataset support the use of both classification and survival-based modelling approaches. The persistent class imbalance motivates the inclusion of models that are robust to rare event detection, such as Random Forest and Random Survival Forest. Additionally, the absence of strong temporal clustering, combined with the constructed proxy time index, provides a basis for exploring a survival framework as a risk-ranking mechanism rather than a strict temporal prediction model. Together, these observations justify the comparative modelling approach adopted in later sections.
+
+### 6.6. Fraud Distribution Across Time
+
+```{r}
+## Plot 1: Fraud cases only across original Time variable
+ggplot(fraud_subset[fraud_subset$Class == 1, ], aes(x = Time)) +
+  geom_histogram(bins = 50, fill = "cornflowerblue", alpha = 0.7) +
+  labs(
+    title = "Distribution of Fraud Cases Across Time",
+    x = "Time (seconds elapsed)",
+    y = "Count"
+  ) +
+  theme_bw()
+```
+
+The distribution of fraud cases across the original `Time` variable shows a broad coverage across the 48-hour observation window, with no strong clustering in any one region. There are mild peaks around 40000 seconds and 90000 seconds, which may reflect daily patterns in fraud occurrence, but the overall spread is approximately uniform. This confirms that the `Time` variable does not exhibit the kind of structured time-to-event behaviour that an RSF model is designed to exploit. We can see that fraud cases are scattered across the timeline, rather than being concentrated in a way that would support meaningful survival modelling. 
+
+```{r}
+## Plot 2: Density comparison of fraud vs non-fraud
+ggplot(fraud_subset, aes(x = Time, fill = factor(Class))) +
+  geom_density(alpha = 0.4) +
+  labs(
+    title = "Time Distribution by Class",
+    x = "Time (seconds elapsed)",
+    y = "Density",
+    fill = "Class"
+  ) +
+  scale_fill_manual(values = c("0" = "blue", "1" = "red"),
+                    labels = c("Non-Fraud", "Fraud")) +
+  theme_bw()
+```
+
+The density comparison reveals that both fraud and non-fraud transactions follow broadly similar temporal distributions, with both exhibiting an approximately bimodal pattern, consistent with the two-day daily cycle. They encouraged a shared dip at around 75000-100000 seconds, which likely reflected a reduced transaction activity overnight. While the fraud density dips slightly more during this period, the two distributions overlap substantially, confirming that time does not discriminate between fraud and non-fraud in this dataset. As a result, we will explore the Relative Fraud Risk Across Time more specifically.
+
+```{r}
+library(ggplot2)
+
+# Compute densities at common points
+time_range <- range(fraud_subset$Time)
+time_points <- seq(time_range[1], time_range[2], length.out = 500)
+
+fraud_density <- density(fraud_subset$Time[fraud_subset$Class == 1],
+                         from = time_range[1], to = time_range[2], n = 500)
+nonfraud_density <- density(fraud_subset$Time[fraud_subset$Class == 0],
+                            from = time_range[1], to = time_range[2], n = 500)
+
+# Relative risk: fraud density / non-fraud density
+relative_risk <- data.frame(
+  Time = fraud_density$x,
+  Relative_Risk = fraud_density$y / nonfraud_density$y
+)
+
+ggplot(relative_risk, aes(x = Time, y = Relative_Risk)) +
+  geom_line(colour = "firebrick", linewidth = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "black") +
+  labs(
+    title = "Relative Fraud Risk Across Time",
+    x = "Time (seconds elapsed)",
+    y = "Relative Risk (Fraud / Non-Fraud Density)",
+    caption = "Dashed line indicates equal relative risk"
+  ) +
+  theme_bw()
+```
+
+
+**Observations:** The relative fraud risk plot reveals a more nuanced temporal pattern than the density overlay alone, with fraud risk peaking at approximately 3-3.5 times the non-fraud density during the low-activity periods (i.e. 15000 and 100000 seconds) before dropping well below the equal-risk threshold during the busier transaction windows. 
+
+This confirms that while fraud cases are broadly distributed across the observation window in absolute terms, the concentration is disproportionate, relative to legitimate transactions during the overnight and early morning periods, which is consistent with reduced monitoring and lower transaction volumes that create more favourable conditions for fraudulent activity. This relative risk structure motivates the simulation analysis in Section 8.5, which investigates whether the RSF's survival framework is better positioned than a Logistic Regression to exploit the temporal pattern.
 
 ## 7. Modelling Framework
 
@@ -340,13 +408,13 @@ This results in four model configurations:
 - Random Survival Forest (No SMOTE)
 - Random Survival Forest (SMOTE)
 
-All models are evaluated using repeated stratified train-test splits to ensure robustness of results.
+All models are evaluated using repeated stratified train-test splits to ensure robustness of results. Note as well that all models were **evaluated across 30 repeated stratified 70-30 train-test splits.**
 
 ### 7.2. Logistic Regression (No SMOTE)
 
 A baseline Logistic Regression model was fitted using the original imbalanced training data. No resampling techniques were applied in this setup, allowing the model to reflect standard classification behaviour under class imbalance.
 
-```{r, echo=FALSE, results='hide', warning=FALSE}
+```{r lr-no-smote, cache=TRUE, results='hide'}
 ## Step 1: Run relevant packages.
 library(caret)
 library(pROC)
@@ -355,71 +423,103 @@ library(PRROC)
 ## Step 2: Set the seed
 set.seed(44940076)
 
-## Step 3: Establish the number of splits
+## Step 3: Establish the number of splits and threshold grid
 n_splits <- 30
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
 
-## Step 4: Create the vectors
-lr_sens_vec  <- numeric(n_splits)
-lr_prec_vec  <- numeric(n_splits)
-lr_auc_vec   <- numeric(n_splits)
-lr_auprc_vec <- numeric(n_splits)
+## Step 4: Create storage — one set of vectors per threshold
+results_store <- list()
+for (t in threshold_grid) {
+  results_store[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
 
 ## Step 5: Execute the Logistic Regression (No SMOTE)
 for (i in 1:n_splits) {
   
-  # 1. Stratified 70–30 split
+  # 1. Stratified 70-30 split
   lr_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
   
   lr_train_data <- fraud_subset[lr_train_idx, ]
   lr_test_data  <- fraud_subset[-lr_train_idx, ]
   
-  # 2. Fit Logistic Regression model
+  # 2. Fit Logistic Regression model (ONCE per split)
   lr_model <- glm(status ~ . - time - Class, data = lr_train_data, family = binomial)
   
-  # 3. Predict probabilities on test set
-  lr_test_prob <- predict(lr_model, newdata = lr_test_data, type = "response")
+  # 3. Predict probabilities (ONCE per split)
+  lr_train_prob <- predict(lr_model, newdata = lr_train_data, type = "response")
+  lr_test_prob  <- predict(lr_model, newdata = lr_test_data, type = "response")
   
-  # 4. Convert probabilities to class predictions (threshold = 0.5)
-  lr_test_pred <- ifelse(lr_test_prob > 0.5, 1, 0)
-  
-  # 5. Confusion Matrix
-  lr_cm <- confusionMatrix(
-    factor(lr_test_pred),
-    factor(lr_test_data$status),
-    positive = "1"
-  )
-  
-  # Store metrics
-  lr_sens_vec[i] <- lr_cm$byClass["Sensitivity"]
-  lr_prec_vec[i] <- lr_cm$byClass["Precision"]
-  
-  # 6. ROC + AUC
+  # 4. ROC + AUC (threshold-independent, compute once)
   lr_true_labels <- as.numeric(as.character(lr_test_data$status))
   
-  lr_roc_obj <- roc(
-    response = lr_true_labels,
-    predictor = lr_test_prob,
-    quiet = TRUE
-  )
+  lr_auc_i <- as.numeric(auc(
+    roc(response = lr_true_labels, predictor = lr_test_prob, quiet = TRUE)
+  ))
   
-  lr_auc_vec[i] <- as.numeric(auc(lr_roc_obj))
-  
-  # 7. AUPRC
+  # 5. AUPRC (threshold-independent, compute once)
   lr_pr_obj <- pr.curve(
     scores.class0 = lr_test_prob[lr_true_labels == 1],
     scores.class1 = lr_test_prob[lr_true_labels == 0],
     curve = FALSE
   )
+  lr_auprc_i <- lr_pr_obj$auc.integral
   
-  lr_auprc_vec[i] <- lr_pr_obj$auc.integral
+  # 6. Loop over thresholds
+  for (t in threshold_grid) {
+    
+    # 6a. Threshold from training data
+    lr_threshold <- quantile(lr_train_prob, probs = t, na.rm = TRUE)
+    
+    # 6b. Apply threshold
+    lr_test_pred <- ifelse(lr_test_prob > lr_threshold, 1, 0)
+    
+    # 6c. Confusion Matrix
+    lr_cm <- confusionMatrix(
+      factor(lr_test_pred, levels = c(0, 1)),
+      factor(lr_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    # 6d. Store metrics
+    tk <- as.character(t)
+    results_store[[tk]]$sens[i]  <- lr_cm$byClass["Sensitivity"]
+    results_store[[tk]]$prec[i]  <- lr_cm$byClass["Precision"]
+    results_store[[tk]]$auc[i]   <- lr_auc_i
+    results_store[[tk]]$auprc[i] <- lr_auprc_i
+  }
 }
+
+## Step 6: Store results
+results_list <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store[[tk]]$sens),
+    Sensitivity_SD = sd(results_store[[tk]]$sens),
+    Precision      = mean(results_store[[tk]]$prec),
+    Precision_SD   = sd(results_store[[tk]]$prec),
+    AUC            = mean(results_store[[tk]]$auc),
+    AUC_SD         = sd(results_store[[tk]]$auc),
+    AUPRC          = mean(results_store[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store[[tk]]$auprc)
+  )
+}
+
+results_lr_threshold <- do.call(rbind, results_list)
+auprc_lr_splits <- results_store[["0.99"]]$auprc
 ```
 
 ### 7.3. Logistic Regression (SMOTE)
 
 This model is used to assess whether synthetic balancing improves classification performance under extreme class imbalance. To address class imbalance, SMOTE was applied to the training data only. Synthetic minority samples were generated based on the feature space, while the test set remained untouched to preserve a realistic evaluation setting. The time variable was excluded from SMOTE generation to avoid introducing artificial temporal structure into the data.
 
-```{r, echo=FALSE, results='hide', warning=FALSE}
+```{r lr-smote, cache=TRUE,  results='hide'}
 ## Step 1: Run relevant packages.
 library(caret)
 library(dplyr)
@@ -430,14 +530,20 @@ library(PRROC)
 ## Step 2: Set the seed
 set.seed(44940076)
 
-## Step 3: Establish the number of splits
+## Step 3: Establish the number of splits and threshold grid
 n_splits <- 30
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
 
-## Step 4: Create the vectors
-lr_smote_sens_vec  <- numeric(n_splits)
-lr_smote_prec_vec  <- numeric(n_splits)
-lr_smote_auc_vec   <- numeric(n_splits)
-lr_smote_auprc_vec <- numeric(n_splits)
+## Step 4: Create storage — one set of vectors per threshold
+results_store <- list()
+for (t in threshold_grid) {
+  results_store[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
 
 ## Step 5: Execute the Logistic Regression (SMOTE)
 for (i in 1:n_splits) {
@@ -470,49 +576,37 @@ for (i in 1:n_splits) {
     X = lr_smote_x_train,
     target = lr_smote_y_train,
     K = lr_smote_k_use,
-    dup_size = 3
+    dup_size = 1
   )
   
   lr_smote_train_balanced <- lr_smote_output$data
   lr_smote_train_balanced$status <- as.numeric(as.character(lr_smote_train_balanced$class))
   lr_smote_train_balanced$class <- NULL
   
-  # 6. Fit Logistic Regression on SMOTE-balanced training data
+  # 6. Fit Logistic Regression on SMOTE-balanced training data (ONCE per split)
   lr_smote_model <- glm(
     status ~ .,
     data = lr_smote_train_balanced,
     family = binomial
   )
   
-  # 7. Predict on untouched test data
-  lr_smote_test_prob <- predict(
-    lr_smote_model,
-    newdata = lr_smote_test_data,
-    type = "response"
-  )
+  # 7. Predict probabilities (ONCE per split)
+  lr_smote_train_prob_original <- predict(lr_smote_model,
+                                          newdata = lr_smote_train_data,
+                                          type = "response")
   
-  lr_smote_test_pred <- ifelse(lr_smote_test_prob > 0.5, 1, 0)
+  lr_smote_test_prob <- predict(lr_smote_model,
+                                newdata = lr_smote_test_data,
+                                type = "response")
   
-  # 8. Confusion matrix
-  lr_smote_cm <- confusionMatrix(
-    factor(lr_smote_test_pred),
-    factor(lr_smote_test_data$status),
-    positive = "1"
-  )
+  # 8. ROC + AUC (threshold-independent, compute once)
+  lr_smote_auc_i <- as.numeric(auc(
+    roc(response = lr_smote_test_data$status,
+        predictor = lr_smote_test_prob,
+        quiet = TRUE)
+  ))
   
-  lr_smote_sens_vec[i] <- lr_smote_cm$byClass["Sensitivity"]
-  lr_smote_prec_vec[i] <- lr_smote_cm$byClass["Precision"]
-  
-  # 9. ROC + AUC
-  lr_smote_roc_obj <- roc(
-    response = lr_smote_test_data$status,
-    predictor = lr_smote_test_prob,
-    quiet = TRUE
-  )
-  
-  lr_smote_auc_vec[i] <- as.numeric(auc(lr_smote_roc_obj))
-  
-  # 10. AUPRC
+  # 9. AUPRC (threshold-independent, compute once)
   lr_smote_true_labels <- lr_smote_test_data$status
   
   lr_smote_keep <- is.finite(lr_smote_test_prob) & is.finite(lr_smote_true_labels)
@@ -524,18 +618,64 @@ for (i in 1:n_splits) {
     scores.class1 = lr_smote_scores[lr_smote_labels == 0],
     curve = FALSE
   )
+  lr_smote_auprc_i <- lr_smote_pr_obj$auc.integral
   
-  lr_smote_auprc_vec[i] <- lr_smote_pr_obj$auc.integral
+  # 10. Loop over thresholds
+  for (t in threshold_grid) {
+    
+    # 10a. Threshold from training data
+    lr_smote_threshold <- quantile(lr_smote_train_prob_original,
+                                   probs = t,
+                                   na.rm = TRUE)
+    
+    # 10b. Apply threshold
+    lr_smote_test_pred <- ifelse(lr_smote_test_prob > lr_smote_threshold, 1, 0)
+    
+    # 10c. Confusion matrix
+    lr_smote_cm <- confusionMatrix(
+      factor(lr_smote_test_pred, levels = c(0, 1)),
+      factor(lr_smote_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    # 10d. Store metrics
+    tk <- as.character(t)
+    results_store[[tk]]$sens[i]  <- lr_smote_cm$byClass["Sensitivity"]
+    results_store[[tk]]$prec[i]  <- lr_smote_cm$byClass["Precision"]
+    results_store[[tk]]$auc[i]   <- lr_smote_auc_i
+    results_store[[tk]]$auprc[i] <- lr_smote_auprc_i
+  }
 }
+
+## Step 6: Store results
+results_list <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store[[tk]]$sens),
+    Sensitivity_SD = sd(results_store[[tk]]$sens),
+    Precision      = mean(results_store[[tk]]$prec),
+    Precision_SD   = sd(results_store[[tk]]$prec),
+    AUC            = mean(results_store[[tk]]$auc),
+    AUC_SD         = sd(results_store[[tk]]$auc),
+    AUPRC          = mean(results_store[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store[[tk]]$auprc)
+  )
+}
+
+results_lr_smote_threshold <- do.call(rbind, results_list)
+auprc_lr_smote_splits <- results_store[["0.99"]]$auprc
 ```
 
 ### 7.4. Random Survival Forest (No SMOTE)
 
 A Random Survival Forest (RSF) model was fitted using the survival representation of the data. The model leverages the proxy time index and event indicator to produce a risk-based prediction. No resampling was applied in this configuration, allowing assessment of RSF performance under naturally imbalanced conditions.
 
-```{r, echo=FALSE, results='hide'}
+```{r rsf-no-smote, cache=TRUE, results='hide'}
 ## Step 1: Run relevant packages.
 library(caret)
+library(dplyr)
 library(randomForestSRC)
 library(pROC)
 library(PRROC)
@@ -543,17 +683,24 @@ library(PRROC)
 ## Step 2: Set the seed
 set.seed(44940076)
 
-## Step 3: Establish the number of splits
+## Step 3: Establish the number of splits and threshold grid
 n_splits <- 30
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
 
-## Step 4: Create the vectors
-rsf_sens_vec  <- numeric(n_splits)
-rsf_prec_vec  <- numeric(n_splits)
-rsf_auc_vec   <- numeric(n_splits)
-rsf_auprc_vec <- numeric(n_splits)
+## Step 4: Create storage — one set of vectors per threshold
+results_store <- list()
+for (t in threshold_grid) {
+  results_store[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
 
 ## Step 5: Execute the RSF (No SMOTE)
 for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
   
   # 1. Stratified 70-30 split
   rsf_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
@@ -562,24 +709,21 @@ for (i in 1:n_splits) {
   rsf_test_data  <- fraud_subset[-rsf_train_idx, ]
   
   # 2. Keep only RSF-relevant variables
-  rsf_train_data <- rsf_train_data %>%
-    dplyr::select(-Class)
-  
-  rsf_test_data <- rsf_test_data %>%
-    dplyr::select(-Class)
+  rsf_train_data <- rsf_train_data %>% dplyr::select(-Class)
+  rsf_test_data  <- rsf_test_data %>% dplyr::select(-Class)
   
   # 3. Ensure numeric 0/1 outcome
   rsf_train_data$status <- as.numeric(as.character(rsf_train_data$status))
   rsf_test_data$status  <- as.numeric(as.character(rsf_test_data$status))
   
-  # 4. Fit RSF model
+  # 4. Fit RSF model (ONCE per split)
   rsf_model <- rfsrc(
     Surv(time, status) ~ .,
     data = rsf_train_data,
     ntree = 100,
     nodesize = 15,
     splitrule = "logrank",
-    nthread = 1,
+    nthread = 4,
     fast = TRUE
   )
   
@@ -593,35 +737,20 @@ for (i in 1:n_splits) {
   
   stopifnot(length(rsf_risk) == nrow(rsf_test_data))
   
-  # 7. Convert risk score using 99th percentile threshold (training-based)
+  # 7. Compute training risk scores (ONCE per split)
   rsf_train_pred <- predict(rsf_model, newdata = rsf_train_data[, rsf_model$xvar.names, drop = FALSE])
   rsf_train_risk <- 1 - rsf_train_pred$survival[, ncol(rsf_train_pred$survival)]
   
-  rsf_threshold <- quantile(rsf_train_risk, 0.99)
-  rsf_test_pred <- ifelse(rsf_risk > rsf_threshold, 1, 0)
-  
-  # 8. Confusion matrix
-  rsf_cm <- confusionMatrix(
-    factor(rsf_test_pred),
-    factor(rsf_test_data$status),
-    positive = "1"
-  )
-  
-  rsf_sens_vec[i] <- rsf_cm$byClass["Sensitivity"]
-  rsf_prec_vec[i] <- rsf_cm$byClass["Precision"]
-  
-  # 9. ROC + AUC
+  # 8. ROC + AUC (threshold-independent, compute once)
   rsf_roc_obj <- roc(
     response = rsf_test_data$status,
     predictor = rsf_risk,
     quiet = TRUE
   )
+  rsf_auc_i <- as.numeric(auc(rsf_roc_obj))
   
-  rsf_auc_vec[i] <- as.numeric(auc(rsf_roc_obj))
-  
-  # 10. AUPRC
+  # 9. AUPRC (threshold-independent, compute once)
   rsf_true_labels <- rsf_test_data$status
-  
   rsf_keep <- is.finite(rsf_risk) & is.finite(rsf_true_labels)
   rsf_scores <- rsf_risk[rsf_keep]
   rsf_labels <- rsf_true_labels[rsf_keep]
@@ -631,9 +760,52 @@ for (i in 1:n_splits) {
     scores.class1 = rsf_scores[rsf_labels == 0],
     curve = FALSE
   )
+  rsf_auprc_i <- rsf_pr_obj$auc.integral
   
-  rsf_auprc_vec[i] <- rsf_pr_obj$auc.integral
+  # 10. Loop over thresholds (cheap — just arithmetic)
+  for (t in threshold_grid) {
+    
+    # 10a. Threshold from training data
+    rsf_threshold <- quantile(rsf_train_risk, probs = t, na.rm = TRUE)
+    
+    # 10b. Apply threshold
+    rsf_test_pred <- ifelse(rsf_risk > rsf_threshold, 1, 0)
+    
+    # 10c. Confusion matrix
+    rsf_cm <- confusionMatrix(
+      factor(rsf_test_pred, levels = c(0, 1)),
+      factor(rsf_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    # 10d. Store metrics
+    tk <- as.character(t)
+    results_store[[tk]]$sens[i]  <- rsf_cm$byClass["Sensitivity"]
+    results_store[[tk]]$prec[i]  <- rsf_cm$byClass["Precision"]
+    results_store[[tk]]$auc[i]   <- rsf_auc_i
+    results_store[[tk]]$auprc[i] <- rsf_auprc_i
+  }
 }
+
+## Step 6: Store results
+results_list <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store[[tk]]$sens),
+    Sensitivity_SD = sd(results_store[[tk]]$sens),
+    Precision      = mean(results_store[[tk]]$prec),
+    Precision_SD   = sd(results_store[[tk]]$prec),
+    AUC            = mean(results_store[[tk]]$auc),
+    AUC_SD         = sd(results_store[[tk]]$auc),
+    AUPRC          = mean(results_store[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store[[tk]]$auprc)
+  )
+}
+
+results_rsf_threshold <- do.call(rbind, results_list)
+auprc_rsf_splits <- results_store[["0.99"]]$auprc
 ```
 
 
@@ -650,7 +822,7 @@ Specifically:
 
 This approach allows RSF to be trained on a balanced dataset, while acknowledging that the survival times of synthetic observations are approximations rather than true event times.
 
-```{r, echo=FALSE, results='hide'}
+```{r rsf-smote, cache=TRUE, results='hide'}
 ## Step 1: Run relevant packages.
 library(caret)
 library(smotefamily)
@@ -662,17 +834,24 @@ library(PRROC)
 ## Step 2: Set the seed
 set.seed(44940076)
 
-## Step 3: Establish the number of splits
+## Step 3: Establish the number of splits and threshold grid
 n_splits <- 30
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
 
-## Step 4: Create the vectors
-rsf_smote_sens_vec  <- numeric(n_splits)
-rsf_smote_prec_vec  <- numeric(n_splits)
-rsf_smote_auc_vec   <- numeric(n_splits)
-rsf_smote_auprc_vec <- numeric(n_splits)
+## Step 4: Create storage — one set of vectors per threshold
+results_store <- list()
+for (t in threshold_grid) {
+  results_store[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
 
 ## Step 5: Execute the RSF (SMOTE)
 for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
   
   # 1. Stratified 70-30 split BEFORE SMOTE
   rsf_smote_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
@@ -681,19 +860,14 @@ for (i in 1:n_splits) {
   rsf_smote_test_data  <- fraud_subset[-rsf_smote_train_idx, ]
   
   # 2. Remove duplicate target column and ensure numeric status
-  rsf_smote_train_data <- rsf_smote_train_data %>%
-    dplyr::select(-Class)
-  
-  rsf_smote_test_data <- rsf_smote_test_data %>%
-    dplyr::select(-Class)
+  rsf_smote_train_data <- rsf_smote_train_data %>% dplyr::select(-Class)
+  rsf_smote_test_data  <- rsf_smote_test_data %>% dplyr::select(-Class)
   
   rsf_smote_train_data$status <- as.numeric(as.character(rsf_smote_train_data$status))
   rsf_smote_test_data$status  <- as.numeric(as.character(rsf_smote_test_data$status))
   
   # 3. Prepare inputs for SMOTE (exclude time)
-  rsf_smote_x_train <- rsf_smote_train_data %>%
-    dplyr::select(-status, -time)
-  
+  rsf_smote_x_train <- rsf_smote_train_data %>% dplyr::select(-status, -time)
   rsf_smote_y_train <- rsf_smote_train_data$status
   
   # 4. Choose SMOTE neighbourhood size safely
@@ -705,7 +879,7 @@ for (i in 1:n_splits) {
     X = rsf_smote_x_train,
     target = rsf_smote_y_train,
     K = rsf_smote_k_use,
-    dup_size = 3
+    dup_size = 1
   )
   
   rsf_smote_train_balanced <- rsf_smote_output$data
@@ -730,14 +904,14 @@ for (i in 1:n_splits) {
     replace = TRUE
   )
   
-  # 7. Fit RSF on SMOTE-balanced training data
+  # 7. Fit RSF on SMOTE-balanced training data (ONCE per split)
   rsf_smote_model <- rfsrc(
     Surv(time, status) ~ .,
     data = rsf_smote_train_balanced,
     ntree = 100,
     nodesize = 15,
     splitrule = "logrank",
-    nthread = 1,
+    nthread = 4,
     fast = TRUE
   )
   
@@ -751,37 +925,21 @@ for (i in 1:n_splits) {
   
   stopifnot(length(rsf_smote_risk) == nrow(rsf_smote_test_data))
   
-  # 10. Convert risk score using 99th percentile threshold (training-based)
+  # 10. Compute training risk scores (ONCE per split)
   rsf_smote_train_pred <- predict(rsf_smote_model,
-                                  newdata = rsf_smote_train_data[, rsf_smote_model$xvar.names, drop = FALSE]
-                                  )
-
+                                  newdata = rsf_smote_train_data[, rsf_smote_model$xvar.names, drop = FALSE])
   rsf_smote_train_risk <- 1 - rsf_smote_train_pred$survival[, ncol(rsf_smote_train_pred$survival)]
-  rsf_smote_threshold <- quantile(rsf_smote_train_risk, 0.99)
-  rsf_smote_test_pred <- ifelse(rsf_smote_risk > rsf_smote_threshold, 1, 0)
   
-  # 11. Confusion matrix
-  rsf_smote_cm <- confusionMatrix(
-    factor(rsf_smote_test_pred),
-    factor(rsf_smote_test_data$status),
-    positive = "1"
-  )
-  
-  rsf_smote_sens_vec[i] <- rsf_smote_cm$byClass["Sensitivity"]
-  rsf_smote_prec_vec[i] <- rsf_smote_cm$byClass["Precision"]
-  
-  # 12. ROC + AUC
+  # 11. ROC + AUC (threshold-independent, compute once)
   rsf_smote_roc_obj <- roc(
     response = rsf_smote_test_data$status,
     predictor = rsf_smote_risk,
     quiet = TRUE
   )
+  rsf_smote_auc_i <- as.numeric(auc(rsf_smote_roc_obj))
   
-  rsf_smote_auc_vec[i] <- as.numeric(auc(rsf_smote_roc_obj))
-  
-  # 13. AUPRC
+  # 12. AUPRC (threshold-independent, compute once)
   rsf_smote_true_labels <- rsf_smote_test_data$status
-  
   rsf_smote_keep <- is.finite(rsf_smote_risk) & is.finite(rsf_smote_true_labels)
   rsf_smote_scores <- rsf_smote_risk[rsf_smote_keep]
   rsf_smote_labels <- rsf_smote_true_labels[rsf_smote_keep]
@@ -791,9 +949,52 @@ for (i in 1:n_splits) {
     scores.class1 = rsf_smote_scores[rsf_smote_labels == 0],
     curve = FALSE
   )
+  rsf_smote_auprc_i <- rsf_smote_pr_obj$auc.integral
   
-  rsf_smote_auprc_vec[i] <- rsf_smote_pr_obj$auc.integral
+  # 13. Loop over thresholds
+  for (t in threshold_grid) {
+    
+    # 13a. Threshold from training data
+    rsf_smote_threshold <- quantile(rsf_smote_train_risk, probs = t, na.rm = TRUE)
+    
+    # 13b. Apply threshold
+    rsf_smote_test_pred <- ifelse(rsf_smote_risk > rsf_smote_threshold, 1, 0)
+    
+    # 13c. Confusion matrix
+    rsf_smote_cm <- confusionMatrix(
+      factor(rsf_smote_test_pred, levels = c(0, 1)),
+      factor(rsf_smote_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    # 13d. Store metrics
+    tk <- as.character(t)
+    results_store[[tk]]$sens[i]  <- rsf_smote_cm$byClass["Sensitivity"]
+    results_store[[tk]]$prec[i]  <- rsf_smote_cm$byClass["Precision"]
+    results_store[[tk]]$auc[i]   <- rsf_smote_auc_i
+    results_store[[tk]]$auprc[i] <- rsf_smote_auprc_i
+  }
 }
+
+## Step 6: Store results
+results_list <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store[[tk]]$sens),
+    Sensitivity_SD = sd(results_store[[tk]]$sens),
+    Precision      = mean(results_store[[tk]]$prec),
+    Precision_SD   = sd(results_store[[tk]]$prec),
+    AUC            = mean(results_store[[tk]]$auc),
+    AUC_SD         = sd(results_store[[tk]]$auc),
+    AUPRC          = mean(results_store[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store[[tk]]$auprc)
+  )
+}
+
+results_rsf_smote_threshold <- do.call(rbind, results_list)
+auprc_rsf_smote_splits <- results_store[["0.99"]]$auprc
 ```
 
 
@@ -823,254 +1024,1128 @@ The following metrics were used to evaluate model performance:
 
 * AUPRC (Precision-Recall)
 
-All metrics were averaged across repeated train-test splits.
+All metrics were averaged across repeated train-test splits. 
 
-```{r, echo=FALSE}
-# LR (No SMOTE)
-results_lr_no_smote <- data.frame(
-  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
-  Mean = c(
-    mean(lr_sens_vec),
-    mean(lr_prec_vec),
-    mean(lr_auc_vec),
-    mean(lr_auprc_vec)
-  ),
-  SD = c(
-    sd(lr_sens_vec),
-    sd(lr_prec_vec),
-    sd(lr_auc_vec),
-    sd(lr_auprc_vec)
-  )
-)
+### 8.1.1. Logistic Regression (No SMOTE)
 
-# LR (SMOTE)
-results_lr_smote <- data.frame(
-  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
-  Mean = c(
-    mean(lr_smote_sens_vec),
-    mean(lr_smote_prec_vec),
-    mean(lr_smote_auc_vec),
-    mean(lr_smote_auprc_vec)
-  ),
-  SD = c(
-    sd(lr_smote_sens_vec),
-    sd(lr_smote_prec_vec),
-    sd(lr_smote_auc_vec),
-    sd(lr_smote_auprc_vec)
-  )
-)
-
-# RSF (No SMOTE)
-results_rsf_no_smote <- data.frame(
-  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
-  Mean = c(
-    mean(rsf_sens_vec),
-    mean(rsf_prec_vec),
-    mean(rsf_auc_vec),
-    mean(rsf_auprc_vec)
-  ),
-  SD = c(
-    sd(rsf_sens_vec),
-    sd(rsf_prec_vec),
-    sd(rsf_auc_vec),
-    sd(rsf_auprc_vec)
-  )
-)
-
-# RSF (SMOTE)
-results_rsf_smote <- data.frame(
-  Metric = c("Sensitivity", "Precision", "AUC", "AUPRC"),
-  Mean = c(
-    mean(rsf_smote_sens_vec),
-    mean(rsf_smote_prec_vec),
-    mean(rsf_smote_auc_vec),
-    mean(rsf_smote_auprc_vec)
-  ),
-  SD = c(
-    sd(rsf_smote_sens_vec),
-    sd(rsf_smote_prec_vec),
-    sd(rsf_smote_auc_vec),
-    sd(rsf_smote_auprc_vec)
-  )
-)
-```
-
-### 8.2. Logistic Regression Results
-
-```{r, echo=FALSE}
+```{r}
 library(pander)
-
-## Logistic Regression (No SMOTE)
-pander(results_lr_no_smote, digits = 6, caption = "Table 1: Logistic Regression (No SMOTE) Performance Metrics")
-
-## Logistic Regression (SMOTE)
-pander(results_lr_smote, digits = 6, caption = "Table 2: Logistic Regression (SMOTE) Performance Metrics")
-```
-
-**Observations:** The Logistic Regression model demonstrates moderate performance across all metrics. The introduction of SMOTE improves sensitivity, indicating an increased ability to detect fraudulent transactions. However, this improvement is accompanied by a reduction in precision, suggesting a higher rate of false positives.
-
-
-### 8.3. Random Survival Forest Results
-
-```{r, echo=FALSE}
-library(pander)
-
-## Random Survival Forest (No SMOTE)
-pander(results_rsf_no_smote, digits = 6, caption = "Table 3: Random Survival Forest (No SMOTE) Performance Metrics")
-
-## Random Survival Forest (SMOTE)
-pander(results_rsf_smote, digits = 6, caption = "Table 4: Random Survival Forest (SMOTE) Performance Metrics")
-```
-
-**Observations:** The RSF model achieves consistently high sensitivity across both configurations, indicating strong capability in identifying fraudulent transactions. However, this is associated with lower precision, reflecting a trade-off where a larger number of transactions are flagged to minimise missed fraud cases.
-
-### 8.4. Comparative Summary
-
-Across all models, clear differences emerge in performance characteristics. Logistic Regression provides a stable baseline but is sensitive to class imbalance. The use of SMOTE improves detection performance, particularly in terms of sensitivity.
-
-In contrast, the RSF model demonstrates superior sensitivity, suggesting that a risk-based modelling approach may be more effective for identifying fraudulent transactions. However, this comes at the cost of lower precision, highlighting the trade-off between detection and false positives.
-
-```{r, echo=FALSE}
-library(dplyr)
-
-combined_results <- bind_rows(
-  mutate(results_lr_no_smote, Model = "LR", SMOTE = "No"),
-  mutate(results_lr_smote, Model = "LR", SMOTE = "Yes"),
-  mutate(results_rsf_no_smote, Model = "RSF", SMOTE = "No"),
-  mutate(results_rsf_smote, Model = "RSF", SMOTE = "Yes")
-)
-
-combined_results
-```
-
-The results of this study highlight the following key findings:
-
-- SMOTE improves sensitivity across all models, confirming its effectiveness in addressing class imbalance.
-- Logistic Regression provides a stable baseline but is sensitive to imbalance effects.
-- The RSF model achieves consistently high sensitivity, indicating strong fraud detection capability.
-- The combination of RSF and SMOTE yields strong overall performance, particularly in terms of ranking and recall.
-- A trade-off between sensitivity and precision is observed across all models.
-
-### 8.5. Visual Comparison
-
-To compare model performance more clearly, two summary plots are presented below. The first focuses on AUPRC, which is especially informative under severe class imbalance. The second focuses on sensitivity, reflecting the ability of each model to correctly identify fraudulent transactions.
-
-#### 8.5.1. AUPRC Comparison
-
-```{r, echo=FALSE, fig.align='center', fig.width=7, fig.height=5}
 library(ggplot2)
 
-df_auprc <- data.frame(
-  Model = c("RSF (SMOTE)", "RSF (No SMOTE)", "LR (SMOTE)", "LR (No SMOTE)"),
-  AUPRC = c(
-    results_rsf_smote$Mean[results_rsf_smote$Metric == "AUPRC"],
-    results_rsf_no_smote$Mean[results_rsf_no_smote$Metric == "AUPRC"],
-    results_lr_smote$Mean[results_lr_smote$Metric == "AUPRC"],
-    results_lr_no_smote$Mean[results_lr_no_smote$Metric == "AUPRC"]
+## Logistic Regression (No SMOTE)
+pander(results_lr_threshold, digits = 6, caption = "Table 1: Logistic Regression (No SMOTE) Performance Metrics")
+
+ggplot(results_lr_threshold, aes(x = Sensitivity, y = Precision)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(xmin = Sensitivity - Sensitivity_SD,
+                    xmax = Sensitivity + Sensitivity_SD),
+                width = 0.01,
+                orientation = "y") +
+  geom_errorbar(aes(ymin = Precision - Precision_SD,
+                    ymax = Precision + Precision_SD),
+                width = 0.01) +
+  geom_text(aes(label = Threshold), vjust = -1.2) +
+  labs(
+    title = "Precision vs Sensitivity Trade-off (LR No SMOTE)",
+    x = "Sensitivity (mean +/- SD)",
+    y = "Precision (mean +/- SD)"
+  ) +
+  theme_bw()
+```
+
+**Observations:** The Logistic Regression (No SMOTE) model demonstrates strong discriminatory power with an AUC of 0.979 and an AUPRC of 0.866, which was stable for both across 30 repeated splits. The threshold grid reveals a clear precision-sensitivity tradeoff, with the 0.99 threshold emerging as the practical operating sweet spot, detecting 85.9% of fraud at 82.5% precision, before precision gains at 0.995 come at the cost of a sharp 35 % drop in sensitivity. Variability across splits remains tight at moderate thresholds but widens noticeably at the extremes, suggesting the model is less stable when pushed to very aggressive cutoffs.
+
+
+### 8.1.2. Logistic Regression (SMOTE)
+
+```{r}
+library(pander)
+library(ggplot2)
+
+## Logistic Regression (SMOTE)
+pander(results_lr_smote_threshold , digits = 6, caption = "Table 2: Logistic Regression (SMOTE) Performance Metrics")
+ggplot(results_lr_smote_threshold, aes(x = Sensitivity, y = Precision)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(xmin = Sensitivity - Sensitivity_SD,
+                    xmax = Sensitivity + Sensitivity_SD),
+                width = 0.01,
+                orientation = "y") +
+  geom_errorbar(aes(ymin = Precision - Precision_SD,
+                    ymax = Precision + Precision_SD),
+                width = 0.01) +
+  geom_text(aes(label = Threshold), vjust = -1.2) +
+  labs(
+    title = "Precision vs Sensitivity Trade-off (LR SMOTE)",
+    x = "Sensitivity (mean +/- SD)",
+    y = "Precision (mean +/- SD)"
+  ) +
+  theme_bw()
+```
+
+**Observations:** Logisitic Regression (SMOTE) produces near-identical results to its No SMOTE counterpart, with an AUC of 0.979 and an AUPRC of 0.868, suggesting that SMOTE balancing offers no meaningful improvement when Logistic Regression (No SMOTE) already discriminates well on this dataset. The same 0.99 sweet spot holds, with 85.8% sensitivity and precision of 82.2%. Additionally, there is a sharp tradeoff at 0.995 where sensitivity drops to 51.1%, while precision rises to 97.2%. Sensitivity SDs are slightly wider under SMOTE (0.015-0.027 vs 0.015-0.019), indicating that the synthetic oversampling may introduce marginal instability without a corresponding performance gain. 
+
+
+### 8.1.3. Random Survival Forest (No SMOTE)
+
+```{r, echo=FALSE}
+library(pander)
+library(ggplot2)
+
+## Random Survival Forest (No SMOTE)
+pander(results_rsf_threshold, digits = 6, caption = "Table 3: Random Survival Forest (No SMOTE) Performance Metrics")
+
+ggplot(results_rsf_threshold, aes(x = Sensitivity, y = Precision)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(xmin = Sensitivity - Sensitivity_SD,
+                    xmax = Sensitivity + Sensitivity_SD),
+                width = 0.01,
+                orientation = "y") +
+  geom_errorbar(aes(ymin = Precision - Precision_SD,
+                    ymax = Precision + Precision_SD),
+                width = 0.01) +
+  geom_text(aes(label = Threshold), vjust = -1.2) +
+  labs(
+    title = "Precision vs Sensitivity Trade-off (RSF No SMOTE)",
+    x = "Sensitivity (mean +/- SD)",
+    y = "Precision (mean +/- SD)"
+  ) +
+  theme_bw()
+```
+
+**Observations:** RSF (No SMOTE) achieves an AUC of 0.979 and AUPRC of 0.868, which matches the Logistic Regression models and suggesting that the survival framework adds no discriminatory advantage on this dataset, potentially because the ULB dataset's `time` variable lacks the geunine time-to-event structure. The 0.99 threshold again emerges as the sweet spot with 85.8% sensitivity and 82.1% precision, closely mirroring the LR results across the entire threshold grid. Sensitivity SDs are noticeably wider than the Logistic Regression (0.015-0.044 vs 0.015-0.019), indicating that the RSF introduces more variability across splits without a corresponding performance benefit.
+
+### 8.1.4. Random Survival Forest (SMOTE)
+
+```{r, echo=FALSE}
+library(pander)
+library(ggplot2)
+
+## Random Survival Forest (SMOTE)
+pander(results_rsf_smote_threshold, digits = 6, caption = "Table 4: Random Survival Forest (SMOTE) Performance Metrics")
+
+ggplot(results_rsf_smote_threshold, aes(x = Sensitivity, y = Precision)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(xmin = Sensitivity - Sensitivity_SD,
+                    xmax = Sensitivity + Sensitivity_SD),
+                width = 0.01,
+                orientation = "y") +
+  geom_errorbar(aes(ymin = Precision - Precision_SD,
+                    ymax = Precision + Precision_SD),
+                width = 0.01) +
+  geom_text(aes(label = Threshold), vjust = -1.2) +
+  labs(
+    title = "Precision vs Sensitivity Trade-off (RSF SMOTE)",
+    x = "Sensitivity (mean +/- SD)",
+    y = "Precision (mean +/- SD)"
+  ) +
+  theme_bw()
+```
+
+**Observations:** RSF (SMOTE) is the weakest performer of the four, with an AUC of 0.977 and an AUPRC of 0.868, which is marginally lower than the other three models, and the sharpest sensitivity drop at 0.995 (47.7% vs ~51% for the others), which suggests that combining SMOTE with RSF introduces noise without benefit on this dataset. The 0.99 threshold remains the best operating point at 85.6% sensitivity and 86.6% precision, though the precision SD at this level (0.028) is comparable to the other models. Overall, neither SMOTE nor the survival framework provides a meaningful advantage over standard logistic regression on the ULB dataset, reinforcing that the dataset's lack of genuine temporal structure limits what the RSF can offer.
+
+### 8.2. Model Comparison at Optimal Threshold
+
+To facilitate direct comparison across all four model configurations, the following plot presents the mean and standard deviation of each evaluation metric at the 0.99 theshold, which was identified as the practical operating sweet spot across all models. 
+
+```{r, warning=FALSE}
+library(ggplot2)
+
+# Combine the 0.99 threshold row from each model
+comparison_df <- rbind(
+  data.frame(Model = "Logistic Regression (No SMOTE)",
+             results_lr_threshold[results_lr_threshold$Threshold == 0.99, ]),
+  data.frame(Model = "Logistic Regression (SMOTE)",
+             results_lr_smote_threshold[results_lr_smote_threshold$Threshold == 0.99, ]),
+  data.frame(Model = "RSF (No SMOTE)",
+             results_rsf_threshold[results_rsf_threshold$Threshold == 0.99, ]),
+  data.frame(Model = "RSF (SMOTE)",
+             results_rsf_smote_threshold[results_rsf_smote_threshold$Threshold == 0.99, ])
+)
+
+# Reshape for plotting
+library(tidyr)
+
+metrics_long <- comparison_df %>%
+  dplyr::select(Model, Sensitivity, Precision, AUC, AUPRC) %>%
+  pivot_longer(cols = -Model, names_to = "Metric", values_to = "Mean")
+
+sds_long <- comparison_df %>%
+  dplyr::select(Model, Sensitivity_SD, Precision_SD, AUC_SD, AUPRC_SD) %>%
+  pivot_longer(cols = -Model, names_to = "Metric", values_to = "SD") %>%
+  mutate(Metric = gsub("_SD", "", Metric))
+
+plot_df <- left_join(metrics_long, sds_long, by = c("Model", "Metric"))
+
+# Plot
+ggplot(plot_df, aes(x = Mean, y = Model, colour = Model)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(xmin = Mean - SD, xmax = Mean + SD),
+                height = 0.2,
+                orientation = "y") +
+  geom_text(aes(label = round(Mean, 3)), vjust = -1.2, size = 3) +
+  facet_wrap(~ Metric, scales = "free_x") +
+  labs(
+    title = "Model Comparison at 0.99 Threshold",
+    x = "Mean +/- SD",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+**Observations:** The comparison confirms that all four models produce near-identical performances at the 0.99 threshold across the metrics (with only the Precision showing a marginal improvement). The introduction of SMOTE nor the adoption of the survival framework yields a meaningful improvement over the standard logistic regression on the ULB dataset. This reinforces the interpretation that the dataset's lack of temporal structure constraints the RSF from offering any advantage, motivating the exploration of an alternative dataset with richer time-to-event information. 
+
+#### 8.2.1. Pairwise Statistical Tests
+
+To confirm that the observed performance differences are not statistically significant, pairwise Wilcoxon signed-rank tests were conducted on the 30 split-level AUPRC values at the 0.99 threshold across all model pairs.
+
+```{r wilcoxon-tests, echo=TRUE}
+library(pander)
+
+## Pairwise Wilcoxon signed-rank tests (paired, 30 splits, threshold = 0.99)
+wt_lr_vs_rsf <- wilcox.test(auprc_lr_splits, auprc_rsf_splits,
+                              paired = TRUE, exact = FALSE)
+
+wt_lr_vs_lr_smote <- wilcox.test(auprc_lr_splits, auprc_lr_smote_splits,
+                                   paired = TRUE, exact = FALSE)
+
+wt_lr_vs_rsf_smote <- wilcox.test(auprc_lr_splits, auprc_rsf_smote_splits,
+                                    paired = TRUE, exact = FALSE)
+
+wt_rsf_vs_rsf_smote <- wilcox.test(auprc_rsf_splits, auprc_rsf_smote_splits,
+                                     paired = TRUE, exact = FALSE)
+
+wilcox_results <- data.frame(
+  Comparison = c(
+    "LR (No SMOTE) vs RSF (No SMOTE)",
+    "LR (No SMOTE) vs LR (SMOTE)",
+    "LR (No SMOTE) vs RSF (SMOTE)",
+    "RSF (No SMOTE) vs RSF (SMOTE)"
   ),
-  SD = c(
-    results_rsf_smote$SD[results_rsf_smote$Metric == "AUPRC"],
-    results_rsf_no_smote$SD[results_rsf_no_smote$Metric == "AUPRC"],
-    results_lr_smote$SD[results_lr_smote$Metric == "AUPRC"],
-    results_lr_no_smote$SD[results_lr_no_smote$Metric == "AUPRC"]
+  W_statistic = c(
+    wt_lr_vs_rsf$statistic,
+    wt_lr_vs_lr_smote$statistic,
+    wt_lr_vs_rsf_smote$statistic,
+    wt_rsf_vs_rsf_smote$statistic
+  ),
+  p_value = c(
+    wt_lr_vs_rsf$p.value,
+    wt_lr_vs_lr_smote$p.value,
+    wt_lr_vs_rsf_smote$p.value,
+    wt_rsf_vs_rsf_smote$p.value
   )
 )
 
-df_auprc$Model <- factor(
-  df_auprc$Model,
-  levels = c("RSF (SMOTE)", "LR (No SMOTE)", "LR (SMOTE)", "RSF (No SMOTE)")
+pander(wilcox_results, digits = 4,
+       caption = "Pairwise Wilcoxon Signed-Rank Tests: AUPRC at 0.99 Threshold (30 splits)")
+```
+
+
+### 8.3. Random Survival Forest (RSF) Parameter Sensitivity
+
+The RSF models in this study were fitted using 100 trees, a minimum node size of 15, and the log-rank splitting rule. These parameters were selected to balance computational efficiency with model stability, and are consistent with commonly adopted configurations in the survival analysis literature. 
+
+Given that the RSF produced near-identical performance to the logistic regression across all thresholds and metrics, it is unlikely that alternative parameter configurations would yield a materially different outcome. The performance equivalence reflects a structural limitation of the dataset, specifically the absence of genuine time-to-event information, rather than a sub optimal model specification. Under these conditions, the RSF is effectively operating as a classification model without access to the survival structure that it typically handles. Additionally, parameter adjustments within the RSF framework cannot compensate for the lack of temporal signal in the data. 
+
+A formal parameter sensitivity analysis comparing the alternative tree counts, node sizes, and splitting rules, will be handled in the second stage of this study, where the RSF will be evaluated on a dataset with richer temporal structure. In that situation, parameter tuning will likely influence model behaviour and performance. 
+
+### 8.4. Robustness Check: Full Dataset
+
+To verify that the downsampling of the non-fraud cases in Section 5.2 did not martially affect the modelling results, the Logistic Regression models (with and without SMOTE) were re-evaluated on the full ULB dataset of 284807 transactions. All experimental parameters were held constant, with 30 repeated with stratified 70-30 splits, the same threshold grid and identical evaluation metrics, to enable a direct comparison with the downsampled results. 
+
+
+#### 8.4.1. Logistic Regression (No SMOTE) - Full Dataset
+
+We perform the Logistic Regression (No SMOTE) on the entire dataset, which is as follows:
+
+```{r lr-no-smote-full, cache=TRUE}
+library(caret)
+library(pROC)
+library(PRROC)
+
+set.seed(44940076)
+
+n_splits <- 10
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
+
+results_store_full <- list()
+for (t in threshold_grid) {
+  results_store_full[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
+
+for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  # 1. Stratified 70-30 split
+  lr_full_train_idx <- createDataPartition(fraud_data$status, p = 0.7, list = FALSE)
+  lr_full_train_data <- fraud_data[lr_full_train_idx, ]
+  lr_full_test_data  <- fraud_data[-lr_full_train_idx, ]
+  
+  # 2. Fit Logistic Regression model (ONCE per split)
+  lr_full_model <- glm(status ~ . - time - Class,
+                       data = lr_full_train_data,
+                       family = binomial)
+  
+  # 3. Predict probabilities (ONCE per split)
+  lr_full_train_prob <- predict(lr_full_model, newdata = lr_full_train_data, type = "response")
+  lr_full_test_prob  <- predict(lr_full_model, newdata = lr_full_test_data, type = "response")
+  
+  # 4. ROC + AUC (threshold-independent, compute once)
+  lr_full_true_labels <- as.numeric(as.character(lr_full_test_data$status))
+  
+  lr_full_auc_i <- as.numeric(auc(
+    roc(response = lr_full_true_labels, predictor = lr_full_test_prob, quiet = TRUE)
+  ))
+  
+  # 5. AUPRC (threshold-independent, compute once)
+  lr_full_pr_obj <- pr.curve(
+    scores.class0 = lr_full_test_prob[lr_full_true_labels == 1],
+    scores.class1 = lr_full_test_prob[lr_full_true_labels == 0],
+    curve = FALSE
+  )
+  lr_full_auprc_i <- lr_full_pr_obj$auc.integral
+  
+  # 6. Loop over thresholds
+  for (t in threshold_grid) {
+    
+    lr_full_threshold <- quantile(lr_full_train_prob, probs = t, na.rm = TRUE)
+    lr_full_test_pred <- ifelse(lr_full_test_prob > lr_full_threshold, 1, 0)
+    
+    lr_full_cm <- confusionMatrix(
+      factor(lr_full_test_pred, levels = c(0, 1)),
+      factor(lr_full_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    tk <- as.character(t)
+    results_store_full[[tk]]$sens[i]  <- lr_full_cm$byClass["Sensitivity"]
+    results_store_full[[tk]]$prec[i]  <- lr_full_cm$byClass["Precision"]
+    results_store_full[[tk]]$auc[i]   <- lr_full_auc_i
+    results_store_full[[tk]]$auprc[i] <- lr_full_auprc_i
+  }
+}
+
+results_list_full <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list_full[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store_full[[tk]]$sens),
+    Sensitivity_SD = sd(results_store_full[[tk]]$sens),
+    Precision      = mean(results_store_full[[tk]]$prec),
+    Precision_SD   = sd(results_store_full[[tk]]$prec),
+    AUC            = mean(results_store_full[[tk]]$auc),
+    AUC_SD         = sd(results_store_full[[tk]]$auc),
+    AUPRC          = mean(results_store_full[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store_full[[tk]]$auprc)
+  )
+}
+
+results_lr_full_threshold <- do.call(rbind, results_list_full)
+```
+
+
+```{r}
+pander(results_lr_full_threshold, digits = 4,
+       caption = "Table 5: LR (No SMOTE) Full Dataset Performance Metrics")
+```
+
+#### 8.4.2. Logistic Regression (SMOTE) - Full Dataset
+
+We now perform the Logistic Regression (SMOTE) on the entire dataset, which is as follows:
+
+```{r lr-smote-full, cache=TRUE}
+library(caret)
+library(dplyr)
+library(smotefamily)
+library(pROC)
+library(PRROC)
+
+set.seed(44940076)
+
+n_splits <- 10
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
+
+results_store_full <- list()
+for (t in threshold_grid) {
+  results_store_full[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
+
+for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  # 1. Stratified 70-30 split BEFORE SMOTE
+  lr_smote_full_train_idx <- createDataPartition(fraud_data$status, p = 0.7, list = FALSE)
+  lr_smote_full_train_data <- fraud_data[lr_smote_full_train_idx, ]
+  lr_smote_full_test_data  <- fraud_data[-lr_smote_full_train_idx, ]
+  
+  # 2. Ensure numeric 0/1 outcome labels
+  lr_smote_full_train_data$status <- as.numeric(as.character(lr_smote_full_train_data$status))
+  lr_smote_full_test_data$status  <- as.numeric(as.character(lr_smote_full_test_data$status))
+  
+  # 3. Prepare training data for SMOTE
+  lr_smote_full_train_input <- lr_smote_full_train_data %>%
+    dplyr::select(-time, -Class)
+  
+  lr_smote_full_x_train <- lr_smote_full_train_input %>%
+    dplyr::select(-status)
+  
+  lr_smote_full_y_train <- lr_smote_full_train_input$status
+  
+  # 4. Choose SMOTE neighbourhood size safely
+  lr_smote_full_n_min <- min(table(lr_smote_full_y_train))
+  lr_smote_full_k_use <- min(5, max(1, lr_smote_full_n_min - 1))
+  
+  # 5. Apply SMOTE to training data only
+  lr_smote_full_output <- SMOTE(
+    X = lr_smote_full_x_train,
+    target = lr_smote_full_y_train,
+    K = lr_smote_full_k_use,
+    dup_size = 1
+  )
+  
+  lr_smote_full_balanced <- lr_smote_full_output$data
+  lr_smote_full_balanced$status <- as.numeric(as.character(lr_smote_full_balanced$class))
+  lr_smote_full_balanced$class <- NULL
+  
+  # 6. Fit Logistic Regression on SMOTE-balanced training data (ONCE per split)
+  lr_smote_full_model <- glm(
+    status ~ .,
+    data = lr_smote_full_balanced,
+    family = binomial
+  )
+  
+  # 7. Predict probabilities (ONCE per split)
+  lr_smote_full_train_prob <- predict(lr_smote_full_model,
+                                      newdata = lr_smote_full_train_data,
+                                      type = "response")
+  lr_smote_full_test_prob <- predict(lr_smote_full_model,
+                                     newdata = lr_smote_full_test_data,
+                                     type = "response")
+  
+  # 8. ROC + AUC (threshold-independent, compute once)
+  lr_smote_full_auc_i <- as.numeric(auc(
+    roc(response = lr_smote_full_test_data$status,
+        predictor = lr_smote_full_test_prob,
+        quiet = TRUE)
+  ))
+  
+  # 9. AUPRC (threshold-independent, compute once)
+  lr_smote_full_true_labels <- lr_smote_full_test_data$status
+  lr_smote_full_keep <- is.finite(lr_smote_full_test_prob) & is.finite(lr_smote_full_true_labels)
+  lr_smote_full_scores <- lr_smote_full_test_prob[lr_smote_full_keep]
+  lr_smote_full_labels <- lr_smote_full_true_labels[lr_smote_full_keep]
+  
+  lr_smote_full_pr_obj <- pr.curve(
+    scores.class0 = lr_smote_full_scores[lr_smote_full_labels == 1],
+    scores.class1 = lr_smote_full_scores[lr_smote_full_labels == 0],
+    curve = FALSE
+  )
+  lr_smote_full_auprc_i <- lr_smote_full_pr_obj$auc.integral
+  
+  # 10. Loop over thresholds
+  for (t in threshold_grid) {
+    
+    lr_smote_full_threshold <- quantile(lr_smote_full_train_prob,
+                                        probs = t,
+                                        na.rm = TRUE)
+    lr_smote_full_test_pred <- ifelse(lr_smote_full_test_prob > lr_smote_full_threshold, 1, 0)
+    
+    lr_smote_full_cm <- confusionMatrix(
+      factor(lr_smote_full_test_pred, levels = c(0, 1)),
+      factor(lr_smote_full_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    tk <- as.character(t)
+    results_store_full[[tk]]$sens[i]  <- lr_smote_full_cm$byClass["Sensitivity"]
+    results_store_full[[tk]]$prec[i]  <- lr_smote_full_cm$byClass["Precision"]
+    results_store_full[[tk]]$auc[i]   <- lr_smote_full_auc_i
+    results_store_full[[tk]]$auprc[i] <- lr_smote_full_auprc_i
+  }
+}
+
+results_list_full <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list_full[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store_full[[tk]]$sens),
+    Sensitivity_SD = sd(results_store_full[[tk]]$sens),
+    Precision      = mean(results_store_full[[tk]]$prec),
+    Precision_SD   = sd(results_store_full[[tk]]$prec),
+    AUC            = mean(results_store_full[[tk]]$auc),
+    AUC_SD         = sd(results_store_full[[tk]]$auc),
+    AUPRC          = mean(results_store_full[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store_full[[tk]]$auprc)
+  )
+}
+
+results_lr_smote_full_threshold <- do.call(rbind, results_list_full)
+```
+
+```{r}
+pander(results_lr_smote_full_threshold, digits = 4,
+       caption = "Table 6: LR (SMOTE) Full Dataset Performance Metrics")
+```
+
+#### 8.4.3. Random Survival Forest (No SMOTE) - Full Dataset
+
+Our next objective is to perform the Random Survival Forest (No SMOTE) on the entire dataset, which is as follows:
+
+```{r rsf-no-smote-full, eval=!file.exists("rsf_full_threshold_results.rds")}
+library(caret)
+library(dplyr)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
+
+set.seed(44940076)
+
+n_splits <- 10
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
+
+results_store_full <- list()
+for (t in threshold_grid) {
+  results_store_full[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
+
+for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  rsf_full_train_idx <- createDataPartition(fraud_data$status, p = 0.7, list = FALSE)
+  rsf_full_train_data <- fraud_data[rsf_full_train_idx, ]
+  rsf_full_test_data  <- fraud_data[-rsf_full_train_idx, ]
+  
+  rsf_full_train_data <- rsf_full_train_data %>% dplyr::select(-Class)
+  rsf_full_test_data  <- rsf_full_test_data %>% dplyr::select(-Class)
+  
+  rsf_full_train_data$status <- as.numeric(as.character(rsf_full_train_data$status))
+  rsf_full_test_data$status  <- as.numeric(as.character(rsf_full_test_data$status))
+  
+  rsf_full_model <- rfsrc(
+    Surv(time, status) ~ .,
+    data = rsf_full_train_data,
+    ntree = 100,
+    nodesize = 15,
+    splitrule = "logrank",
+    nthread = 4,
+    fast = TRUE
+  )
+  
+  rsf_full_test_x <- rsf_full_test_data[, rsf_full_model$xvar.names, drop = FALSE]
+  rsf_full_pred <- predict(rsf_full_model, newdata = rsf_full_test_x)
+  
+  rsf_full_risk <- 1 - rsf_full_pred$survival[, ncol(rsf_full_pred$survival)]
+  rsf_full_risk <- as.numeric(rsf_full_risk)
+  
+  stopifnot(length(rsf_full_risk) == nrow(rsf_full_test_data))
+  
+  rsf_full_train_pred <- predict(rsf_full_model,
+                                  newdata = rsf_full_train_data[, rsf_full_model$xvar.names, drop = FALSE])
+  rsf_full_train_risk <- 1 - rsf_full_train_pred$survival[, ncol(rsf_full_train_pred$survival)]
+  
+  rsf_full_roc_obj <- roc(
+    response = rsf_full_test_data$status,
+    predictor = rsf_full_risk,
+    quiet = TRUE
+  )
+  rsf_full_auc_i <- as.numeric(auc(rsf_full_roc_obj))
+  
+  rsf_full_true_labels <- rsf_full_test_data$status
+  rsf_full_keep <- is.finite(rsf_full_risk) & is.finite(rsf_full_true_labels)
+  rsf_full_scores <- rsf_full_risk[rsf_full_keep]
+  rsf_full_labels <- rsf_full_true_labels[rsf_full_keep]
+  
+  rsf_full_pr_obj <- pr.curve(
+    scores.class0 = rsf_full_scores[rsf_full_labels == 1],
+    scores.class1 = rsf_full_scores[rsf_full_labels == 0],
+    curve = FALSE
+  )
+  rsf_full_auprc_i <- rsf_full_pr_obj$auc.integral
+  
+  for (t in threshold_grid) {
+    rsf_full_threshold <- quantile(rsf_full_train_risk, probs = t, na.rm = TRUE)
+    rsf_full_test_pred <- ifelse(rsf_full_risk > rsf_full_threshold, 1, 0)
+    
+    rsf_full_cm <- confusionMatrix(
+      factor(rsf_full_test_pred, levels = c(0, 1)),
+      factor(rsf_full_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    tk <- as.character(t)
+    results_store_full[[tk]]$sens[i]  <- rsf_full_cm$byClass["Sensitivity"]
+    results_store_full[[tk]]$prec[i]  <- rsf_full_cm$byClass["Precision"]
+    results_store_full[[tk]]$auc[i]   <- rsf_full_auc_i
+    results_store_full[[tk]]$auprc[i] <- rsf_full_auprc_i
+  }
+  
+  # Clean up large objects to free memory
+  rm(rsf_full_model, rsf_full_pred, rsf_full_train_pred,
+     rsf_full_train_data, rsf_full_test_data)
+  gc()
+}
+
+results_list_full <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list_full[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store_full[[tk]]$sens),
+    Sensitivity_SD = sd(results_store_full[[tk]]$sens),
+    Precision      = mean(results_store_full[[tk]]$prec),
+    Precision_SD   = sd(results_store_full[[tk]]$prec),
+    AUC            = mean(results_store_full[[tk]]$auc),
+    AUC_SD         = sd(results_store_full[[tk]]$auc),
+    AUPRC          = mean(results_store_full[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store_full[[tk]]$auprc)
+  )
+}
+
+results_rsf_full_threshold <- do.call(rbind, results_list_full)
+saveRDS(results_rsf_full_threshold, "rsf_full_threshold_results.rds")
+```
+
+```{r load-rsf-full, echo=FALSE}
+if (file.exists("rsf_full_threshold_results.rds")) {
+  results_rsf_full_threshold <- readRDS("rsf_full_threshold_results.rds")
+}
+```
+
+```{r}
+library(pander)
+pander(results_rsf_full_threshold, digits = 4,
+       caption = "Table 7: RSF (No SMOTE) Full Dataset Performance Metrics")
+```
+
+#### 8.4.4. Random Survival Forest (SMOTE) - Full Dataset
+
+Finally, we want to perform the Random Survival Forest (SMOTE) on the entire dataset, which is as follows:
+
+```{r rsf-smote-full, eval=!file.exists("rsf_smote_full_threshold_results.rds")}
+library(caret)
+library(smotefamily)
+library(dplyr)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
+
+set.seed(44940076)
+
+n_splits <- 10
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
+
+results_store_full <- list()
+for (t in threshold_grid) {
+  results_store_full[[as.character(t)]] <- list(
+    sens  = numeric(n_splits),
+    prec  = numeric(n_splits),
+    auc   = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
+
+for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  rsf_smote_full_train_idx <- createDataPartition(fraud_data$status, p = 0.7, list = FALSE)
+  rsf_smote_full_train_data <- fraud_data[rsf_smote_full_train_idx, ]
+  rsf_smote_full_test_data  <- fraud_data[-rsf_smote_full_train_idx, ]
+  
+  rsf_smote_full_train_data <- rsf_smote_full_train_data %>% dplyr::select(-Class)
+  rsf_smote_full_test_data  <- rsf_smote_full_test_data %>% dplyr::select(-Class)
+  
+  rsf_smote_full_train_data$status <- as.numeric(as.character(rsf_smote_full_train_data$status))
+  rsf_smote_full_test_data$status  <- as.numeric(as.character(rsf_smote_full_test_data$status))
+  
+  rsf_smote_full_x_train <- rsf_smote_full_train_data %>% dplyr::select(-status, -time)
+  rsf_smote_full_y_train <- rsf_smote_full_train_data$status
+  
+  rsf_smote_full_n_min <- min(table(rsf_smote_full_y_train))
+  rsf_smote_full_k_use <- min(5, max(1, rsf_smote_full_n_min - 1))
+  
+  rsf_smote_full_output <- SMOTE(
+    X = rsf_smote_full_x_train,
+    target = rsf_smote_full_y_train,
+    K = rsf_smote_full_k_use,
+    dup_size = 1
+  )
+  
+  rsf_smote_full_balanced <- rsf_smote_full_output$data
+  rsf_smote_full_balanced$status <- as.numeric(as.character(rsf_smote_full_balanced$class))
+  rsf_smote_full_balanced$class <- NULL
+  
+  rsf_smote_full_balanced$time <- NA_real_
+  rsf_smote_full_idx0 <- which(rsf_smote_full_balanced$status == 0)
+  rsf_smote_full_idx1 <- which(rsf_smote_full_balanced$status == 1)
+  
+  rsf_smote_full_balanced$time[rsf_smote_full_idx0] <- sample(
+    rsf_smote_full_train_data$time[rsf_smote_full_train_data$status == 0],
+    length(rsf_smote_full_idx0), replace = TRUE
+  )
+  rsf_smote_full_balanced$time[rsf_smote_full_idx1] <- sample(
+    rsf_smote_full_train_data$time[rsf_smote_full_train_data$status == 1],
+    length(rsf_smote_full_idx1), replace = TRUE
+  )
+  
+  rsf_smote_full_model <- rfsrc(
+    Surv(time, status) ~ .,
+    data = rsf_smote_full_balanced,
+    ntree = 50,
+    nodesize = 15,
+    splitrule = "logrank",
+    nthread = 4,
+    fast = TRUE
+  )
+  
+  rsf_smote_full_test_x <- rsf_smote_full_test_data[, rsf_smote_full_model$xvar.names, drop = FALSE]
+  rsf_smote_full_pred <- predict(rsf_smote_full_model, newdata = rsf_smote_full_test_x)
+  
+  rsf_smote_full_risk <- 1 - rsf_smote_full_pred$survival[, ncol(rsf_smote_full_pred$survival)]
+  rsf_smote_full_risk <- as.numeric(rsf_smote_full_risk)
+  
+  stopifnot(length(rsf_smote_full_risk) == nrow(rsf_smote_full_test_data))
+  
+  rsf_smote_full_train_pred <- predict(rsf_smote_full_model,
+                                        newdata = rsf_smote_full_train_data[, rsf_smote_full_model$xvar.names, drop = FALSE])
+  rsf_smote_full_train_risk <- 1 - rsf_smote_full_train_pred$survival[, ncol(rsf_smote_full_train_pred$survival)]
+  
+  rsf_smote_full_roc_obj <- roc(
+    response = rsf_smote_full_test_data$status,
+    predictor = rsf_smote_full_risk,
+    quiet = TRUE
+  )
+  rsf_smote_full_auc_i <- as.numeric(auc(rsf_smote_full_roc_obj))
+  
+  rsf_smote_full_true_labels <- rsf_smote_full_test_data$status
+  rsf_smote_full_keep <- is.finite(rsf_smote_full_risk) & is.finite(rsf_smote_full_true_labels)
+  rsf_smote_full_scores <- rsf_smote_full_risk[rsf_smote_full_keep]
+  rsf_smote_full_labels <- rsf_smote_full_true_labels[rsf_smote_full_keep]
+  
+  rsf_smote_full_pr_obj <- pr.curve(
+    scores.class0 = rsf_smote_full_scores[rsf_smote_full_labels == 1],
+    scores.class1 = rsf_smote_full_scores[rsf_smote_full_labels == 0],
+    curve = FALSE
+  )
+  rsf_smote_full_auprc_i <- rsf_smote_full_pr_obj$auc.integral
+  
+  for (t in threshold_grid) {
+    
+    rsf_smote_full_threshold <- quantile(rsf_smote_full_train_risk, probs = t, na.rm = TRUE)
+    rsf_smote_full_test_pred <- ifelse(rsf_smote_full_risk > rsf_smote_full_threshold, 1, 0)
+    
+    rsf_smote_full_cm <- confusionMatrix(
+      factor(rsf_smote_full_test_pred, levels = c(0, 1)),
+      factor(rsf_smote_full_test_data$status, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    tk <- as.character(t)
+    results_store_full[[tk]]$sens[i]  <- rsf_smote_full_cm$byClass["Sensitivity"]
+    results_store_full[[tk]]$prec[i]  <- rsf_smote_full_cm$byClass["Precision"]
+    results_store_full[[tk]]$auc[i]   <- rsf_smote_full_auc_i
+    results_store_full[[tk]]$auprc[i] <- rsf_smote_full_auprc_i
+  }
+  
+  # Clean up large objects to free memory
+  rm(rsf_smote_full_model, rsf_smote_full_pred, rsf_smote_full_train_pred,
+     rsf_smote_full_train_data, rsf_smote_full_test_data, rsf_smote_full_balanced)
+  gc()
+}
+
+results_list_full <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list_full[[tk]] <- data.frame(
+    Threshold      = t,
+    Sensitivity    = mean(results_store_full[[tk]]$sens),
+    Sensitivity_SD = sd(results_store_full[[tk]]$sens),
+    Precision      = mean(results_store_full[[tk]]$prec),
+    Precision_SD   = sd(results_store_full[[tk]]$prec),
+    AUC            = mean(results_store_full[[tk]]$auc),
+    AUC_SD         = sd(results_store_full[[tk]]$auc),
+    AUPRC          = mean(results_store_full[[tk]]$auprc),
+    AUPRC_SD       = sd(results_store_full[[tk]]$auprc)
+  )
+}
+
+results_rsf_smote_full_threshold <- do.call(rbind, results_list_full)
+saveRDS(results_rsf_smote_full_threshold, "rsf_smote_full_threshold_results.rds")
+```
+
+```{r load-rsf-smote-full, echo=FALSE}
+if (file.exists("rsf_smote_full_threshold_results.rds")) {
+  results_rsf_smote_full_threshold <- readRDS("rsf_smote_full_threshold_results.rds")
+}
+```
+
+```{r}
+pander(results_rsf_smote_full_threshold, digits = 4,
+       caption = "Table 8: RSF (SMOTE) Full Dataset Performance Metrics")
+```
+
+The full dataset results revealed a notable AUPRC advantage for RSF (SMOTE) of 0.831, as against the others that were between 0.760-0.769. To investigate whether this reflects genuine exploitation of temporal fraud-risk structure, a simulation analysis was conducted using datasets with known relative-risk time profiles.
+
+### 8.5. Simulation Analysis: Temporal Risk Structure
+
+The full dataset robustness check in Section 8.4 received a AUPRC advantage for the RSF (SMOTE) over the Logistic Regression models (0.831 vs 0.760-0.769), a finding that stands in contrast to the near-identical performance observed on the downsampled dataset. One plausible explanation for this divergence is that the full dataset's temporal fraud-risk structure, characterised by relative fraud-risk peaking at 3-3.5 times the baseline during low-activity periods, as documented in Section 6.6, provides a signal that RSF's survival framework is better positioned to exploit than a standard linear classifier. To investigate this hypothesis, a simulation analysis was conducted, where fraud labels were reassigned across the full dataset according to four synthetic relative risk profiles of increasing temporal intensity: flat, mild moderate, and strong. By controlling the degree of temporal structure while holding the feature space constant, this design allows direct assessment of whether RSF's AUPRC advantage grows as the temporal fraud-risk structure intensifies, which would be expected if the survival framework was genuinely leveraging time as a predictive axis.
+
+```{r sim-main-loop, eval=!file.exists("rsf_sim_results.rds")}
+## Step 1: Run relevant packages
+library(caret)
+library(dplyr)
+library(smotefamily)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
+library(ggplot2)
+
+# Step 2: Set the seed
+set.seed(44940076)
+
+## Step 3: Estabilish the simulation parameters
+n_splits_sim <- 10
+
+## Step 4: Define relative risk profile functions
+rr_profiles <- list(
+  flat = function(t) rep(1, length(t)),
+  mild = function(t) 1 + 1.0 * sin (pi * t),
+  moderate = function(t){
+    1 + 2.0 * (exp(-((t - 0.10)^2) / 0.004) + exp(-((t - 0.55)^2) / 0.004))
+  },
+  strong = function(t) {
+    1 + 4.0 * (exp(-((t - 0.10)^2) / 0.004) + exp(-((t - 0.55)^2) / 0.04))
+  }
 )
 
-df_auprc$Highlight <- ifelse(df_auprc$Model == "RSF (SMOTE)", "Best", "Other")
+## Step 5: Define label reassignment function
+simulate_labels <- function (Time_vec, rr_fn, n_fraud = 492L, seed = 42) {
+  set.seed(seed)
+  t_norm        <- (Time_vec - min(Time_vec)) / (max(Time_vec) - min(Time_vec))
+  weights       <- rr_fn(t_norm)
+  weights       <- weights / sum(weights)
+  fraud_idx     <- sample(length(Time_vec), size = n_fraud, replace = FALSE, prob = weights)
+  sim_class     <- integer(length(Time_vec))
+  sim_class[fraud_idx] <- 1L
+  sim_class
+  
+}
 
-ggplot(df_auprc, aes(x = Model, y = AUPRC, color = Highlight)) +
-  geom_point(size = 4) +
+## Step 6: Create storage
+sim_results_store <- list()
+for (profile_name in names(rr_profiles)) {
+  sim_results_store[[profile_name]] <- list(
+    auprc_lr        = numeric(n_splits_sim),
+    auprc_rsf_smote = numeric(n_splits_sim)
+  )
+}
+
+## Step 7: Execute simulation across profiles and splits
+for (profile_name in names(rr_profiles)) {
+  message("- Profile: ", profile_name)
+  
+  # Reassign Class and status labels according to current RR profile
+  sim_data        <- fraud_data
+  sim_data$Class  <- simulate_labels(sim_data$Time, rr_profiles[[profile_name]])
+  sim_data$status <- sim_data$Class
+
+  for (i in seq_len(n_splits_sim)) {
+    message("  Split ", i, " of ", n_splits_sim, " — ", Sys.time())
+
+    # 1. Stratified 70-30 split
+    sim_train_idx  <- createDataPartition(sim_data$status, p = 0.7, list = FALSE)
+    sim_train_data <- sim_data[sim_train_idx, ]
+    sim_test_data  <- sim_data[-sim_train_idx, ]
+
+    # 2. Ensure numeric outcome
+    sim_train_data$status <- as.numeric(as.character(sim_train_data$status))
+    sim_test_data$status  <- as.numeric(as.character(sim_test_data$status))
+
+    sim_true_labels <- sim_test_data$status
+    
+    ###### LOGISTIC REGRESSION ###### 
+    # 3. Fit LR model, once per split
+    sim_lr_model <- glm(status ~ . - time - Class,
+                        data   = sim_train_data,
+                        family = binomial)
+    
+    # 4. Predict probabilities
+    sim_lr_test_prob <- predict(sim_lr_model,
+                                newdata = sim_test_data,
+                                type = "response")
+    
+    # 5. AUPRC
+    sim_lr_keep   <- is.finite(sim_lr_test_prob) & is.finite(sim_true_labels)
+    sim_lr_pr_obj <- pr.curve(
+      scores.class0 = sim_lr_test_prob[sim_lr_keep][sim_true_labels[sim_lr_keep] == 1],
+      scores.class1 = sim_lr_test_prob[sim_lr_keep][sim_true_labels[sim_lr_keep] == 0],
+      curve = FALSE
+    )
+    sim_results_store[[profile_name]]$auprc_lr[i] <- sim_lr_pr_obj$auc.integral
+    
+    ##### RSF (SMOTE) #####
+    # 6. Prepare RSF training and test data (removing the 'Class' column)
+    sim_rsf_train <- sim_train_data %>% dplyr::select(-Class)
+    sim_rsf_test  <- sim_test_data  %>% dplyr::select(-Class)
+    
+    # 7. Prepare SMOTE inputs (exclude 'time' and 'status')
+    sim_rsf_x_train <- sim_rsf_train %>% dplyr::select(-status, -time)
+    sim_rsf_y_train <- sim_rsf_train$status
+    
+    # 8. Choose SMOTE neighbourhood size safely
+    sim_rsf_n_min <- min(table(sim_rsf_y_train))
+    sim_rsf_k_use <- min(5, max(1, sim_rsf_n_min - 1))
+    
+    # 9. Apply SMOTE to training data only
+    sim_rsf_smote_output <- SMOTE(
+      X        = sim_rsf_x_train,
+      target   = sim_rsf_y_train,
+      K        = sim_rsf_k_use,
+      dup_size = 1
+    )
+    sim_rsf_balanced        <- sim_rsf_smote_output$data
+    sim_rsf_balanced$status <- as.numeric(as.character(sim_rsf_balanced$class))
+    sim_rsf_balanced$class  <- NULL
+    
+    # 10. Reattach empirical time values to SMOTE observations
+    sim_rsf_balanced$time <- NA_real_
+    sim_rsf_idx0 <- which(sim_rsf_balanced$status == 0)
+    sim_rsf_idx1 <- which(sim_rsf_balanced$status == 1)
+    sim_rsf_balanced$time[sim_rsf_idx0] <- sample(
+      sim_rsf_train$time[sim_rsf_train$status == 0],
+      length(sim_rsf_idx0), replace = TRUE
+    )
+    sim_rsf_balanced$time[sim_rsf_idx1] <- sample(
+      sim_rsf_train$time[sim_rsf_train$status == 1],
+      length(sim_rsf_idx1), replace = TRUE
+    )
+    
+    # 11. Fit RSF on SMOTE-balanced training data (once per split)
+    sim_rsf_model <- rfsrc(
+      Surv(time, status) ~ .,
+      data      = sim_rsf_balanced,
+      ntree     = 100,
+      nodesize  = 15,
+      splitrule = "logrank",
+      nthread   = 4,
+      fast      = TRUE
+    )
+
+    # 12. Predict on untouched test data
+    sim_rsf_test_x <- sim_rsf_test[, sim_rsf_model$xvar.names, drop = FALSE]
+    sim_rsf_pred   <- predict(sim_rsf_model, newdata = sim_rsf_test_x)
+
+    # 13. Compute risk score
+    sim_rsf_risk <- 1 - sim_rsf_pred$survival[, ncol(sim_rsf_pred$survival)]
+    sim_rsf_risk <- as.numeric(sim_rsf_risk)
+    
+    # 14. AUPRC
+    sim_rsf_keep   <- is.finite(sim_rsf_risk) & is.finite(sim_true_labels)
+    sim_rsf_pr_obj <- pr.curve(
+      scores.class0 = sim_rsf_risk[sim_rsf_keep][sim_true_labels[sim_rsf_keep] == 1],
+      scores.class1 = sim_rsf_risk[sim_rsf_keep][sim_true_labels[sim_rsf_keep] == 0],
+      curve = FALSE
+    )
+    sim_results_store[[profile_name]]$auprc_rsf_smote[i] <- sim_rsf_pr_obj$auc.integral
+
+    # Clean up large objects to free memory
+    rm(sim_rsf_model, sim_rsf_pred,
+       sim_rsf_balanced, sim_rsf_smote_output)
+    gc()
+  }
+}
+
+## Step 8: Compile results
+sim_results_list <- list()
+for (profile_name in names(rr_profiles)) {
+  sim_results_list[[profile_name]] <- data.frame(
+    Profile             = profile_name,
+    AUPRC_LR            = mean(sim_results_store[[profile_name]]$auprc_lr),
+    AUPRC_LR_SD         = sd(sim_results_store[[profile_name]]$auprc_lr),
+    AUPRC_RSF_SMOTE     = mean(sim_results_store[[profile_name]]$auprc_rsf_smote),
+    AUPRC_RSF_SMOTE_SD  = sd(sim_results_store[[profile_name]]$auprc_rsf_smote)
+  )
+}
+
+results_sim_summary <- do.call(rbind, sim_results_list)
+results_sim_summary$Profile <- factor(results_sim_summary$Profile,
+                                      levels = c("flat", "mild", "moderate", "strong"))
+
+saveRDS(results_sim_summary, "rsf_sim_results.rds")
+```
+
+
+```{r load-sim-results, echo=FALSE}
+if (file.exists("rsf_sim_results.rds")) {
+  results_sim_summary <- readRDS("rsf_sim_results.rds")
+}
+```
+
+```{r}
+## Create the Simulation Analysis Summary
+pander(results_sim_summary, digits = 4,
+       caption = "Table 9: Simulation Analysis - Mean AUPRC by Temporal Risk Profile")
+
+## Plot AUPRC by profile and model
+sim_plot_long <- tidyr::pivot_longer(
+  results_sim_summary,
+  cols      = c(AUPRC_LR, AUPRC_RSF_SMOTE),
+  names_to  = "Model",
+  values_to = "Mean_AUPRC"
+) %>%
+  mutate(
+    SD = ifelse(Model == "AUPRC_LR",
+                results_sim_summary$AUPRC_LR_SD[match(Profile, results_sim_summary$Profile)],
+                results_sim_summary$AUPRC_RSF_SMOTE_SD[match(Profile, results_sim_summary$Profile)]),
+    Model = dplyr::recode(Model,
+      "AUPRC_LR"        = "Logistic Regression",
+      "AUPRC_RSF_SMOTE" = "RSF (SMOTE)")
+  )
+
+ggplot(sim_plot_long,
+       aes(x = Profile, y = Mean_AUPRC, colour = Model, group = Model)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 3) +
   geom_errorbar(
-    aes(ymin = AUPRC - SD, ymax = AUPRC + SD),
+    aes(ymin = Mean_AUPRC - SD,
+        ymax = Mean_AUPRC + SD),
     width = 0.15
   ) +
-  scale_color_manual(values = c("Best" = "firebrick2", "Other" = "grey30")) +
-  coord_flip() +
-  labs(
-    x = "Model",
-    y = "AUPRC",
-    title = "Ranking Performance under Extreme Class Imbalance"
+  scale_colour_manual(
+    values = c("Logistic Regression" = "cornflowerblue",
+               "RSF (SMOTE)"         = "firebrick")
+    
   ) +
-  theme_bw(base_size = 14) +
-  theme(
-    axis.text = element_text(color = "black"),
-    axis.title = element_text(color = "black"),
-    axis.ticks = element_line(color = "black"),
-    panel.grid.major = element_line(color = "grey95"),
-    panel.grid.minor = element_line(color = "grey95"),
-    legend.position = "none"
-  )
+    labs(
+      title    = "AUPRC by Temporal Risk Profile",
+      subtitle = "Simulated datasets with reassigned fraud labels (full dataset, 10 splits)",
+      x        = "Relative Risk Profile (increasing temporal structure)",
+      y        = "Mean AUPRC (+/- 1 SD)",
+      colour   = "Model"
+    ) + 
+  theme_bw() +
+  theme(legend.position = "bottom")
 ```
 
-The AUPRC comparative highlights the ranking performance of each model under extreme class imbalance. This metric is particularly important in fraud detection because it places emphasis on the model’s ability to prioritise true fraud cases without being overly influenced by the dominant non-fraud class. The results suggest that the RSF model with SMOTE achieves the strongest ranking performance overall.
+**Commentary:** The simulation results provide no support for the hypothesis that the RSF is better positioned than Logistic Regression to exploit temporal fraud-risk structure, with both models performing at near-baseline AUPRC levels (~0.00173, which is consistent with the dataset fraud prevalence of 492/284807) across all four profiles. This reflects the fact that reassigning fraud labels by time alone destroys the feature signal from V1-V28 that both models otherwise rely upon. Neither model demonstrates a meaningful or consistent AUPRC advantage as the temporal structure intensifies from flat through to strong, with Logistic Regression marginally outperforming RSF (SMOTE) at the moderate and strong profiles, contrary to the expected direction of effect.
 
-#### 8.5.2. Sensitivity Comparison
-
-Below is the outline of the Sensitivity plot.
-
-```{r, echo=FALSE, fig.align='center', fig.width=7, fig.height=5}
-df_sens <- data.frame(
-  Model = c("RSF (SMOTE)", "RSF (No SMOTE)", "LR (SMOTE)", "LR (No SMOTE)"),
-  Sensitivity = c(
-    results_rsf_smote$Mean[results_rsf_smote$Metric == "Sensitivity"],
-    results_rsf_no_smote$Mean[results_rsf_no_smote$Metric == "Sensitivity"],
-    results_lr_smote$Mean[results_lr_smote$Metric == "Sensitivity"],
-    results_lr_no_smote$Mean[results_lr_no_smote$Metric == "Sensitivity"]
-  )
-)
-
-df_sens$Model <- factor(
-  df_sens$Model,
-  levels = c("RSF (SMOTE)", "RSF (No SMOTE)", "LR (SMOTE)", "LR (No SMOTE)")
-)
-
-df_sens$Highlight <- ifelse(df_sens$Model == "RSF (SMOTE)", "Best", "Other")
-
-ggplot(df_sens, aes(x = Model, y = Sensitivity, fill = Highlight)) +
-  geom_col(width = 0.7) +
-  geom_text(
-    aes(label = sprintf("%.3f", Sensitivity)),
-    hjust = -0.1,
-    size = 4,
-    color = "black"
-  ) +
-  coord_flip() +
-  scale_fill_manual(values = c("Best" = "firebrick3", "Other" = "grey75")) +
-  scale_y_continuous(limits = c(0, 1.05), breaks = seq(0, 1, 0.2)) +
-  labs(
-    title = "Sensitivity (Proactive Fraud Detection)",
-    x = "Model",
-    y = "Sensitivity (Recall)"
-  ) +
-  theme_bw(base_size = 14) +
-  theme(
-    legend.position = "none",
-    axis.text = element_text(color = "black"),
-    axis.title = element_text(color = "black")
-  )
-```
-
-The sensitivity plot shows that the RSF-based approaches achieve the strongest recall, indicating that they are more effective at identifying fraudulent cases. This is important in fraud detection settings where missing a fraud event may be more costly than raising additional false positives. By contrast, the Logistic Regression models show lower sensitivity, particularly without SMOTE, suggesting that class imbalance has a stronger negative effect on standard classification performance.
-
+This finding reinforces the primary null result: RSF offers no discriminatory advantage over Logistic Regression on this dataset. The simulation provides additional evidence that this equivalence holds even under controlled conditions that are designed to favour the survival framework, suggesting that the modest AUPRC advantage that was observed for RSF (SMOTE) on the full dataset in Section 8.4 is unlikely to reflect a genuine exploitation of the temporal structure.
 
 ## 9. Explainability
 
-### 9.1 Why Explainability Matters in Fraud Detection
+### 9.1. Why Explainability Matters in Fraud Detection
 
 In fraud detection, model performance alone is not sufficient. Banking environments require models that are not only effective, but also interpretable. Explanations are important for several reasons: they help analysts understand why a transaction has been flagged, support internal validation and governance processes, and improve confidence in model-assisted decision-making.
 
 This is particularly relevant in the present study, where the Random Survival Forest produces a risk-based score rather than a simple class probability. Explainability methods therefore help connect the model output to transaction-level reasoning.
 
-### 9.2 Global Explainability
+### 9.2. Global Explainability
 
 Global explainability provides an overall view of which predictors contribute most strongly to the model’s behaviour across the dataset. This is useful for identifying broad fraud-related patterns and determining whether the model is relying on a concentrated set of meaningful features.
 
-### 9.3 Local Explainability using SHAP
+To enable computation of variable importance with 95% confidence intervals across repeated splits, a stratified subsample of the training data was used in each iteration. All fraud cases were retained to preserve the minority class signal, while 10000 non-fraud cases were randomly sampled to reduce computational overhead. This objective of this subsampling is to identify the relative contribution of each feature, rather than to optimise predictive performance. The importance values were computed using random permutation across 30 repeated stratified splits, with 50 trees per forest. 
+
+```{r rsf-importance, cache=TRUE}
+library(caret)
+library(dplyr)
+library(randomForestSRC)
+library(ggplot2)
+
+set.seed(44940076)
+
+n_splits <- 30
+
+importance_list <- vector("list", n_splits)
+
+for (i in 1:n_splits) {
+  message("Importance split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  # 1. Stratified 70-30 split
+  rsf_imp_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
+  rsf_imp_train_data <- fraud_subset[rsf_imp_train_idx, ]
+  
+  # 2. Prepare data
+  rsf_imp_train_data <- rsf_imp_train_data %>% dplyr::select(-Class)
+  rsf_imp_train_data$status <- as.numeric(as.character(rsf_imp_train_data$status))
+  
+  # 3. Subsample for computational efficiency (keep all fraud cases)
+  rsf_imp_fraud <- rsf_imp_train_data[rsf_imp_train_data$status == 1, ]
+  rsf_imp_nonfraud <- rsf_imp_train_data[rsf_imp_train_data$status == 0, ]
+  rsf_imp_nonfraud_sample <- rsf_imp_nonfraud[sample(nrow(rsf_imp_nonfraud), 
+                                                      min(10000, nrow(rsf_imp_nonfraud))), ]
+  rsf_imp_subsample <- rbind(rsf_imp_fraud, rsf_imp_nonfraud_sample)
+  
+  # 4. Fit RSF with importance on subsample
+  rsf_imp_model <- rfsrc(
+    Surv(time, status) ~ .,
+    data = rsf_imp_subsample,
+    ntree = 50,
+    nodesize = 15,
+    splitrule = "logrank",
+    nthread = 4,
+    fast = TRUE,
+    importance = "random"
+  )
+  
+  # 5. Store importance
+  importance_list[[i]] <- rsf_imp_model$importance
+}
+
+# Combine into a matrix
+importance_matrix <- do.call(rbind, importance_list)
+
+# Compute mean and 95% CI
+importance_summary <- data.frame(
+  Feature  = colnames(importance_matrix),
+  Mean     = colMeans(importance_matrix),
+  SD       = apply(importance_matrix, 2, sd)
+)
+
+importance_summary$SE <- importance_summary$SD / sqrt(n_splits)
+importance_summary$CI_lower <- importance_summary$Mean - 1.96 * importance_summary$SE
+importance_summary$CI_upper <- importance_summary$Mean + 1.96 * importance_summary$SE
+
+importance_summary <- importance_summary %>%
+  arrange(Mean) %>%
+  mutate(Feature = factor(Feature, levels = Feature))
+
+# Forest plot
+ggplot(importance_summary, aes(x = Mean, y = Feature)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(xmin = CI_lower, xmax = CI_upper),
+                height = 0.3,
+                orientation = "y") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "red") +
+  labs(
+    title = "RSF Variable Importance with 95% CIs",
+    subtitle = paste0("Across ", n_splits, " repeated stratified splits"),
+    x = "Variable Importance (Mean +/- 95% CI)",
+    y = NULL
+  ) +
+  theme_bw()
+```
+
+**Observations:** The variable importance analysis reveals a clear tiered structure in terms of feature contributions to the RSF model. V14 and V4 emerge as the dominant predictors, with importance values roughl three times higher than any other feature. This suggests that the model's fraud detection capability is heavily concentrated towards these two variables. A second tier comprising Time, V12, V11, V17, and V10 provides a meaningful, but more moderate contributions, with all confidence intervals comfortably above zero. Below these, a cluster of marginal contributors including V7, V19, V16, V8, Amount, and V20 are statistically significant but practically small in their influence. The remaining features show little to no reliable contribution, with many confidence intervals crossing or touching the zero line.
+
+Notably, the proxy Time index ranks among the top five important features, which raises a methodological concern (and opportunity). Since this variable is constructed by row ordering, rather than as a genuine temporal measure, its prominence suggests that the RSF may be exploiting an artificial structural pattern in the data, rather than learning meaningful time-to-event relationships. This further reinforces the need to evaluate the RSF framework on a dataset with genuine temportal structure, where the importance of time-related features would carry substantive meaning. 
+
+### 9.3. Local Explainability using SHAP
 
 While global importance identifies which variables matter overall, SHAP provides a local explanation for a single transaction. This allows the contribution of each feature to the RSF risk score to be decomposed at the transaction level. In this study, SHAP is applied to the RSF model with SMOTE in order to examine how individual predictors increase or decrease the estimated fraud risk for a selected observation.
 
@@ -1117,7 +2192,8 @@ The SHAP explanation shows how the selected transaction’s risk score is built 
 
 From a banking perspective, this is useful because it mirrors the logic of case investigation. Rather than receiving only a risk score, an analyst can see which characteristics of the transaction most strongly influenced the model’s assessment.
 
-### 9.4 Local Explainability using LIME
+
+### 9.4. Local Explainability using LIME
 
 Local Interpretable Model-agnostic Explanations (LIME) provides a second local explanation framework by approximating the model decision around a selected transaction with a simpler interpretable representation. In this study, LIME is used to complement SHAP by showing which features most strongly support the local fraud classification for an individual case. 
 
@@ -1150,7 +2226,9 @@ predict_proba_rsf <- function(newdata) {
   p1 <- as.numeric(
     predict(cal_model, newdata = data.frame(train_risk = r), type = "response")
   )
-  data.frame("0" = 1 - p1, "1" = p1)
+  out <- data.frame(1 - p1, p1)
+  colnames(out) <- c("0", "1")
+  out
 }
 
 # Required methods for lime
@@ -1182,17 +2260,18 @@ lime_explanation <- explain(
 
 plot_features(lime_explanation)
 ```
+
 LIME provides a complementary local explanation framework by approximating the behaviour of the RSF model in the neighbourhood of a selected transaction using a simpler, interpretable model. This allows the contribution of a small number of features to be expressed in a linear and human-readable form.
 
 The LIME output shows both positive and negative contributions. Features with positive weights increase the likelihood of the transaction being classified as fraudulent, while those with negative weights reduce it. This provides a directional explanation of the decision, rather than simply identifying important variables.
 
 While SHAP provides a theoretically grounded decomposition of the prediction, LIME offers a simpler and more interpretable local approximation. The two methods therefore complement each other, with SHAP emphasising consistency and LIME emphasising interpretability.
 
-From a banking perspective, this type of explanation aligns closely with how fraud analysts review cases. This directional interpretation allows analysts to understand not only which features matter, but how they influence the model’s decision. This supports faster investigation and more informed decision-making.
+From a banking perspective, this type of explanation aligns closely with how fraud analysts review cases. This directional interpretation allows analysts to understand not only which features matter, but how they influence the model's decision. This supports faster investigation and more informed decision-making.
 
-However, it is important to note that LIME explanations are based on a local approximation of the model and may not fully capture complex interactions present in the RSF model. As a result, explanations should be interpreted as indicative rather than exact.
+However, it is important to note that LIME explanations are based on a local approximation of the model and may not fully capture complex interactions present in the RSF model. As a result, explanations should be interpreted as indicative rather than exact. Additionally, given that the RSF and logistic regression models produced near-identical performance on the ULB dataset, the explainability outputs here reflect a model operating without a meaningful survival structure advantage. The interpretive value of these methods may become more distinctive when applied to a dataset where the RSF's temporal modelling is more meaningfully leveraged, allowing SHAP and LIME to surface feature contributions that are unique to the survival framework rather than shared with simpler classification approaches.
 
-### 9.5 Banking Relevance of Explainability
+### 9.5. Banking Relevance of Explainability
 
 The explainability results strengthen the practical relevance of the modelling framework. In a banking environment, fraud detection systems are not used in isolation - they support fraud operations teams who must review alerts, prioritise investigations, and justify intervention decisions.
 
@@ -1200,63 +2279,295 @@ Global explainability helps identify the broad drivers of suspicious behaviour a
 
 More broadly, the inclusion of explainability addresses one of the key limitations of black-box fraud models. Rather than producing only a ranked risk score, the framework developed in this study also provides a mechanism for understanding how that score was formed.
 
+## 10. Random Forest - Very random indeed!
 
-## 10. Discussion
+Additionally, we experiment with the Random Forest (RF) framework, in order to see this as a difference from the RSF from another lens. 
 
-### 10.1. Model Performance Comparison
+### 10.1. Random Forest (Classification, No SMOTE) - DOwnsampled
 
-The results show that both model choice and imbalance handling significantly influence fraud detection performance. Logistic regression provides a strong baseline, but is sensitive to class imbalance. The introduction of SMOTE however, improves sensitivity, though it is at the expense of precision.
+```{r rf_classification_run, echo=TRUE, cache=FALSE, message=TRUE, warning=FALSE}
 
-In contrast, the Random Survival Forest (RSF) demonstrates consistently strong sensitivity, indicating a survival-based risk framework may be more effective in identifying fraudulent transactions.
+## Step 1: Run relevant packages
+library(caret)
+library(dplyr)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
 
-### 10.2. Classification vs Survival 
+## Step 2: Set the seed
+set.seed(44940076)
 
-A key distinction in this study lies in probability-based classification and risk-based survival modelling. Classification models estimate the probability that a transaction is fraudulent, whereas the RSF model estimates the relative risk of a fraud occurrence. This allows transactions to be ranked, rather than simply being classified.
+## Step 3: Establish the number of splits and threshold grid
+n_splits <- 30
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
 
-This ranking-based approach aligns more closely with real-world fraud detection systems, where the prioritisation of high-risk transactions are often more important than binary classification.
+## Step 4: Create storage — one set of vectors per threshold
+results_store <- list()
+for (t in threshold_grid) {
+  results_store[[as.character(t)]] <- list(
+    sens = numeric(n_splits),
+    prec = numeric(n_splits),
+    auc = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
 
-### 10.3. Impact of SMOTE
+## Step 5: Execute the Random Forest (Classification, No SMOTE)
+for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  # 1. Stratified 70-30 split
+  rf_train_idx <- createDataPartition(fraud_subset$status, p = 0.7, list = FALSE)
+  rf_train_data <- fraud_subset[rf_train_idx, ]
+  rf_test_data  <- fraud_subset[-rf_train_idx, ]
+  
+  # 2. Keep only RF-relevant variables (drop survival-specific columns)
+  rf_train_data <- rf_train_data %>% dplyr::select(-time, -status)
+  rf_test_data  <- rf_test_data  %>% dplyr::select(-time, -status)
+  
+  # 3. Ensure Class is a factor for classification mode
+  rf_train_data$Class <- factor(rf_train_data$Class, levels = c(0, 1))
+  rf_test_data$Class  <- factor(rf_test_data$Class,  levels = c(0, 1))
+  
+  # 4. Fit RF classification model (ONCE per split)
+  rf_model <- rfsrc(
+    Class ~ .,
+    data = rf_train_data,
+    ntree = 100,
+    nodesize = 15,
+    splitrule = "gini",
+    nthread = 4,
+    fast = TRUE
+  )
+  
+  # 5. Predict on test data
+  rf_test_x <- rf_test_data[, rf_model$xvar.names, drop = FALSE]
+  rf_pred   <- predict(rf_model, newdata = rf_test_x)
+  rf_prob   <- rf_pred$predicted[, "1"]
+  
+  # 6. Predict on training data (for threshold calibration)
+  rf_train_pred <- predict(rf_model,
+                            newdata = rf_train_data[, rf_model$xvar.names, drop = FALSE])
+  rf_train_prob <- rf_train_pred$predicted[, "1"]
+  
+  # 7. ROC + AUC (threshold-independent, compute once)
+  rf_true_labels <- as.numeric(as.character(rf_test_data$Class))
+  rf_auc_i <- as.numeric(auc(
+    roc(response = rf_true_labels, predictor = rf_prob, quiet = TRUE)
+  ))
+  
+  # 8. AUPRC (threshold-independent, compute once)
+  rf_pr_obj <- pr.curve(
+    scores.class0 = rf_prob[rf_true_labels == 1],
+    scores.class1 = rf_prob[rf_true_labels == 0],
+    curve = FALSE
+  )
+  rf_auprc_i <- rf_pr_obj$auc.integral
+  
+  # 9. Loop over thresholds
+  for (t in threshold_grid) {
+    rf_threshold <- quantile(rf_train_prob, probs = t, na.rm = TRUE)
+    rf_test_pred <- ifelse(rf_prob > rf_threshold, 1, 0)
+    
+    rf_cm <- confusionMatrix(
+      factor(rf_test_pred, levels = c(0, 1)),
+      factor(rf_true_labels, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    tk <- as.character(t)
+    results_store[[tk]]$sens[i]  <- rf_cm$byClass["Sensitivity"]
+    results_store[[tk]]$prec[i]  <- rf_cm$byClass["Precision"]
+    results_store[[tk]]$auc[i]   <- rf_auc_i
+    results_store[[tk]]$auprc[i] <- rf_auprc_i
+  }
+  
+  # 10. Clean up
+  rm(rf_model, rf_pred, rf_train_pred)
+  gc()
+}
 
-SMOTE improves the sensitivity across both modelling approaches, confirming its effectiveness in handling class imbalance. However, its use in survival modelling introduces additional considerations, as synthetic observations do not naturally include time-to-event information relevant to modelling. As a result, this highlights a trade-off between improved detection performance and methodological consistency.
+## Step 6: Store results
+results_list <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list[[tk]] <- data.frame(
+    Threshold = t,
+    Sensitivity = mean(results_store[[tk]]$sens),
+    Sensitivity_SD = sd(results_store[[tk]]$sens),
+    Precision = mean(results_store[[tk]]$prec),
+    Precision_SD = sd(results_store[[tk]]$prec),
+    AUC = mean(results_store[[tk]]$auc),
+    AUC_SD = sd(results_store[[tk]]$auc),
+    AUPRC = mean(results_store[[tk]]$auprc),
+    AUPRC_SD = sd(results_store[[tk]]$auprc)
+  )
+}
+results_rf_threshold <- do.call(rbind, results_list)
+saveRDS(results_rf_threshold, here::here("rf_classification_results.rds"))
+```
 
-### 10.4 Role of Explainability
+```{r rf_classification_load, echo=FALSE}
+results_rf_threshold <- readRDS(here::here("rf_classification_results.rds"))
+```
 
-The inclusion of SHAP and LIME strengthens the interpretability of the modelling framework. While the RSF introduces a more complex, risk-based approach, the explainability techniques allow this complexity to be translated into meaningful transaction-level insights.
+```{r rf_classification_table, echo=TRUE}
+pander(results_rf_threshold, digits = 6,
+       caption = "Table: Random Forest (Classification, No SMOTE) Performance Metrics")
+```
 
-This is particularly important in fraud detection, since model outputs must be interpretable for operational and governance processes. 
+### 10.2. Random Forest (Classification, SMOTE) - Full Dataset
 
-## 11. Banking Implications
+```{r rf_smote_full_run, echo=TRUE, cache=FALSE, message=TRUE, warning=FALSE}
+## Step 1: Run relevant packages
+library(caret)
+library(dplyr)
+library(smotefamily)
+library(randomForestSRC)
+library(pROC)
+library(PRROC)
 
-### 11.1. Fraud Detection Operations
+## Step 2: Set the seed
+set.seed(44940076)
 
-In practical banking environments, fraud detection systems must balance detection accuracy with operational efficiency. High sensitivity is particularly valuable, since missed fraudulent transactions have significant financial and reputational consequences to both financial institutions and its customers. 
+## Step 3: Establish the number of splits and threshold grid
+n_splits <- 10
+threshold_grid <- c(0.90, 0.95, 0.975, 0.99, 0.995)
 
-### 11.2. Risk Prioritisation
+## Step 4: Create storage — one set of vectors per threshold
+results_store_full <- list()
+for (t in threshold_grid) {
+  results_store_full[[as.character(t)]] <- list(
+    sens = numeric(n_splits),
+    prec = numeric(n_splits),
+    auc = numeric(n_splits),
+    auprc = numeric(n_splits)
+  )
+}
 
-The RSF model enables transactions to be ranked by risk, allowing fraud teams to prioritise investigations. This is especially important in high-volume settings where this is not feasible to review all transactions manually. Hence, this ranking-based approach aligns closely with real-world fraud detection workflows. 
+## Step 5: Execute the Random Forest (Classification, SMOTE) - Full Dataset
+for (i in 1:n_splits) {
+  message("Split ", i, " of ", n_splits, " — ", Sys.time())
+  
+  # 1. Stratified 70-30 split BEFORE SMOTE
+  rf_smote_full_train_idx <- createDataPartition(fraud_data$status, p = 0.7, list = FALSE)
+  rf_smote_full_train_data <- fraud_data[rf_smote_full_train_idx, ]
+  rf_smote_full_test_data  <- fraud_data[-rf_smote_full_train_idx, ]
+  
+  # 2. Drop survival-specific columns (proxy time index and duplicate status)
+  rf_smote_full_train_data <- rf_smote_full_train_data %>% dplyr::select(-time, -status)
+  rf_smote_full_test_data  <- rf_smote_full_test_data  %>% dplyr::select(-time, -status)
+  
+  # 3. Ensure numeric 0/1 outcome for SMOTE target
+  rf_smote_full_train_data$Class <- as.numeric(as.character(rf_smote_full_train_data$Class))
+  rf_smote_full_test_data$Class  <- factor(rf_smote_full_test_data$Class, levels = c(0, 1))
+  
+  # 4. Prepare inputs for SMOTE
+  rf_smote_full_x_train <- rf_smote_full_train_data %>% dplyr::select(-Class)
+  rf_smote_full_y_train <- rf_smote_full_train_data$Class
+  
+  # 5. Choose SMOTE neighbourhood size safely
+  rf_smote_full_n_min <- min(table(rf_smote_full_y_train))
+  rf_smote_full_k_use <- min(5, max(1, rf_smote_full_n_min - 1))
+  
+  # 6. Apply SMOTE to training data only
+  rf_smote_full_output <- SMOTE(
+    X = rf_smote_full_x_train,
+    target = rf_smote_full_y_train,
+    K = rf_smote_full_k_use,
+    dup_size = 1
+  )
+  
+  rf_smote_full_balanced <- rf_smote_full_output$data
+  rf_smote_full_balanced$Class <- factor(
+    as.numeric(as.character(rf_smote_full_balanced$class)), levels = c(0, 1)
+  )
+  rf_smote_full_balanced$class <- NULL
+  
+  # 7. Fit RF classification model on SMOTE-balanced training data (ONCE per split)
+  rf_smote_full_model <- rfsrc(
+    Class ~ .,
+    data = rf_smote_full_balanced,
+    ntree = 100,
+    nodesize = 15,
+    splitrule = "gini",
+    nthread = 4,
+    fast = TRUE
+  )
+  
+  # 8. Predict on untouched test data
+  rf_smote_full_test_x <- rf_smote_full_test_data[, rf_smote_full_model$xvar.names, drop = FALSE]
+  rf_smote_full_pred   <- predict(rf_smote_full_model, newdata = rf_smote_full_test_x)
+  rf_smote_full_prob   <- rf_smote_full_pred$predicted[, "1"]
+  
+  # 9. Predict on SMOTE-balanced training data (for threshold calibration)
+  rf_smote_full_train_pred <- predict(rf_smote_full_model,
+    newdata = rf_smote_full_balanced[, rf_smote_full_model$xvar.names, drop = FALSE])
+  rf_smote_full_train_prob <- rf_smote_full_train_pred$predicted[, "1"]
+  
+  # 10. ROC + AUC (threshold-independent, compute once)
+  rf_smote_full_true_labels <- as.numeric(as.character(rf_smote_full_test_data$Class))
+  rf_smote_full_auc_i <- as.numeric(auc(
+    roc(response = rf_smote_full_true_labels, predictor = rf_smote_full_prob, quiet = TRUE)
+  ))
+  
+  # 11. AUPRC (threshold-independent, compute once)
+  rf_smote_full_pr_obj <- pr.curve(
+    scores.class0 = rf_smote_full_prob[rf_smote_full_true_labels == 1],
+    scores.class1 = rf_smote_full_prob[rf_smote_full_true_labels == 0],
+    curve = FALSE
+  )
+  rf_smote_full_auprc_i <- rf_smote_full_pr_obj$auc.integral
+  
+  # 12. Loop over thresholds
+  for (t in threshold_grid) {
+    rf_smote_full_threshold <- quantile(rf_smote_full_train_prob, probs = t, na.rm = TRUE)
+    rf_smote_full_test_pred <- ifelse(rf_smote_full_prob > rf_smote_full_threshold, 1, 0)
+    
+    rf_smote_full_cm <- confusionMatrix(
+      factor(rf_smote_full_test_pred, levels = c(0, 1)),
+      factor(rf_smote_full_true_labels, levels = c(0, 1)),
+      positive = "1"
+    )
+    
+    tk <- as.character(t)
+    results_store_full[[tk]]$sens[i]  <- rf_smote_full_cm$byClass["Sensitivity"]
+    results_store_full[[tk]]$prec[i]  <- rf_smote_full_cm$byClass["Precision"]
+    results_store_full[[tk]]$auc[i]   <- rf_smote_full_auc_i
+    results_store_full[[tk]]$auprc[i] <- rf_smote_full_auprc_i
+  }
+  
+  # 13. Clean up large objects to free memory
+  rm(rf_smote_full_model, rf_smote_full_pred, rf_smote_full_train_pred,
+     rf_smote_full_train_data, rf_smote_full_test_data, rf_smote_full_balanced)
+  gc()
+}
 
-### 11.3. Explainability and Trust
+## Step 6: Store results
+results_list_full <- list()
+for (t in threshold_grid) {
+  tk <- as.character(t)
+  results_list_full[[tk]] <- data.frame(
+    Threshold = t,
+    Sensitivity = mean(results_store_full[[tk]]$sens),
+    Sensitivity_SD = sd(results_store_full[[tk]]$sens),
+    Precision = mean(results_store_full[[tk]]$prec),
+    Precision_SD = sd(results_store_full[[tk]]$prec),
+    AUC = mean(results_store_full[[tk]]$auc),
+    AUC_SD = sd(results_store_full[[tk]]$auc),
+    AUPRC = mean(results_store_full[[tk]]$auprc),
+    AUPRC_SD = sd(results_store_full[[tk]]$auprc)
+  )
+}
+results_rf_smote_full_threshold <- do.call(rbind, results_list_full)
+saveRDS(results_rf_smote_full_threshold, here::here("rf_smote_full_results.rds"))
+```
 
-Explainability techniques such as SHAP and LIME provide transparency into model decisions, supporting analyst understanding and regulatory compliance. This helps build trust in model-assisted decision-making and supports effective deployment in banking environments. 
+```{r rf_smote_full_load, echo=FALSE}
+results_rf_smote_full_threshold <- readRDS(here::here("rf_smote_full_results.rds"))
+```
 
-## 12. Limitations
-
-This study had several limitations, namely:
-
-- The time variable used in the survival framework is a proxy, rather than a true temporal measure.
-- SMOTE does not generate survival times, requiring synthetic assignment of the time values.
-- Downsampling reduces the level of representation that the original dataset contains.
-- RSF classification requires a threshold, which is chosen through experimentation.
-- Explainability results are demonstrated on a limited number of observations.
-
-## 13. Conclusion
-
-This study compared classification and survival-based modelling approaches to fraud detection under extreme class imbalance. The results themselves show that:
-
-- SMOTE improves sensitivity across models
-- RSF provides a strong risk-based alternative to classification
-- RSF combined with SMOTE achieves strong detection performance
-
-More importantly, the survival-based framework introduces a ranking perspective that aligns more closely with real-world fraud detection systems. The inclusion of explainability techniques further enhances the practical applicability of the approach. 
-
-Future work should focus on improving temporal modelling and extendng explainability to broader transaction sets. 
+```{r rf_smote_full_table, echo=TRUE}
+pander(results_rf_smote_full_threshold, digits = 6,
+       caption = "Table: Random Forest (Classification, SMOTE) Full Dataset Performance Metrics")
+```
