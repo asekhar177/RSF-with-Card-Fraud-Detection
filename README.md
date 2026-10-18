@@ -3,7 +3,7 @@
 Code and analysis notebooks for my Master of Research (MRes) thesis at Macquarie University (2026).
 
 **Author:** Arjun Sekhar
-**Supervisors:** Dr Samuel Muller and Dr Maurizio Manuguerra
+**Supervisors:** Prof. Samuel Muller and A/Prof. Maurizio Manuguerra
 
 ---
 
