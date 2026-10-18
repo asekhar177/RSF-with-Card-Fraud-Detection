@@ -28,7 +28,7 @@ The comparison is organised around a **conditions matrix**. Drawn from the compa
 | Folder | Thesis section | Contents |
 |---|---|---|
 | [`1-ULB_MultiMethod`](1-ULB_MultiMethod) | 3.1–3.6, 4.2–4.5.2, 4.7, 4.8 | Primary ULB analysis: LR, RSF, RF and Cox; SMOTE configurations; full-dataset robustness check; label-reassignment simulation; concordance diagnostic |
-| [`2-ULB Time Sensitivity`](2-ULB%20Time%20Sensitivity) | 4.8.2 | Paired refits of every model with and without the raw `Time` covariate (final version: **v4**) |
+| [`2-ULB Time Sensitivity`](2-ULB%20Time%20Sensitivity) | 4.8.2 | Paired refits of every model with and without the raw `Time` covariate |
 | [`3-ULB Explainability`](3-ULB%20Explainability) | 4.6 | Variable importance, SHAP, LIME and cross-model importance rankings |
 | [`4-Simulations/DGP Scenario Reproduction`](4-Simulations/DGP%20Scenario%20Reproduction) | 4.5.1, 5.4 | Controlled data-generating-process simulation (Scenario A: ULB-like; Scenario B: favourable to RSF) |
 | [`4-Simulations/NHPP Simulation`](4-Simulations/NHPP%20Simulation) | (exploratory) | Non-homogeneous Poisson process simulations varying the strength of a daily fraud cycle |
