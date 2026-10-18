@@ -1,0 +1,676 @@
+---
+title: "Supplementary Analysis: Poisson Regression and Diurnal Time Structure"
+subtitle: "ULB Credit Card Fraud Dataset"
+author: "Arjun Sekhar"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+## 1. Introduction
+
+### 1.1. Objective
+
+This notebook documents a supplementary analysis raised during supervisor review, examining whether the `Time` variable in the ULB dataset carries genuine temporal structure at the aggregate level, distinct from the instance-level survival structure examined in the main thesis notebook.
+
+Two related questions are addressed:
+
+1. Does fraud **rate** (rather than fraud classification) vary systematically across the observation window, using a Poisson/Negative Binomial regression framework with transaction count as an exposure offset?
+
+2. Does the `Time` variable exhibit a recurring 24-hour (diurnal) cycle when folded onto a single day, consistent with the two-day structure of the dataset?
+
+### 1.2. Motivation
+
+This analysis complements the RSF-vs-LR comparison in the Methodology Notebook. That comparison evaluates whether individual-level survival structure (risk accumulation over time-to-event) benefits RSF over LR, and finds no advantage, consistent with the absence of genuine time-to-event structure in `Time`. This notebook asks a different, aggregate-level question: irrespective of instance-level survival structure, does the *rate* of fraud vary across time in a way that is model-agnostic and does not depend on RSF or LR being correctly specified?
+
+If such structure exists, it would not contradict the main thesis finding, since a cyclical, exogenous rate pattern (e.g., driven by lower transaction volume and reduced monitoring overnight) is a different kind of temporal signal from the risk-accumulation structure RSF is designed to exploit. It would, however, sharpen the explanation for *why* `Time` was excluded from SMOTE interpolation and *why* the dataset lacks the structural conditions RSF benefits from.
+
+## 2. Libraries and Data
+
+```{r, warning=FALSE, message=FALSE}
+## Step 1: Load required packages
+## Note: MASS is loaded before dplyr to avoid the select() masking conflict
+library(MASS)
+library(dplyr)
+library(ggplot2)
+library(pander)
+
+## Step 2: Set seed
+set.seed(44940076)
+
+## Step 3: Load data
+## Locates creditcard.csv even if the working directory doesn't match where
+## the file lives - avoids "cannot open the connection" errors when this
+## script/notebook is run from a different session or folder than before.
+csv_path <- "creditcard.csv"
+
+if (!file.exists(csv_path)) {
+  ## Search a reasonable set of common locations before giving up
+  search_dirs <- c(
+    getwd(),
+    path.expand("~"),
+    path.expand("~/Documents"),
+    path.expand("~/Downloads"),
+    path.expand("~/Desktop")
+  )
+
+  found <- list.files(
+    path = search_dirs,
+    pattern = "^creditcard\\.csv$",
+    recursive = TRUE,
+    full.names = TRUE,
+    ignore.case = TRUE
+  )
+
+  if (length(found) > 0) {
+    csv_path <- found[1]
+    message("creditcard.csv not found in working directory - using: ", csv_path)
+  } else {
+    stop(
+      "creditcard.csv could not be found in the working directory or common ",
+      "folders. Current working directory is: ", getwd(),
+      ". Set csv_path manually to the correct file location before proceeding."
+    )
+  }
+}
+
+fraud_data <- read.csv(csv_path, header = TRUE)
+fraud_data <- na.omit(fraud_data)
+
+dim(fraud_data)
+table(fraud_data$Class)
+```
+
+\newpage
+
+## 3. Poisson Regression: Fraud Rate as a Function of Time
+
+### 3.1. Bin Time into Fixed Windows
+
+`Time` is binned into fixed-width windows, and within each window the fraud count and total transaction count are recorded. The transaction count serves as the exposure term (offset) in the regression, so the model is estimating fraud **rate per transaction**, not raw fraud count.
+
+```{r}
+## Step 1: Set bin width and construct bins
+bin_width <- 3600  # 1-hour bins (~48 bins across the ~48-hour window)
+
+poisson_data <- fraud_data %>%
+  mutate(time_bin = floor(Time / bin_width)) %>%
+  group_by(time_bin) %>%
+  summarise(
+    fraud_count     = sum(Class),
+    n_transactions  = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    bin_start_hr  = (time_bin * bin_width) / 3600,
+    observed_rate = fraud_count / n_transactions
+  )
+
+pander(poisson_data, caption = "Fraud Counts and Exposure by Hourly Time Bin")
+```
+
+### 3.2. Fit Poisson GLM
+
+```{r}
+## Step 1: Fit Poisson model with log(n_transactions) as offset
+poisson_model <- glm(
+  fraud_count ~ time_bin,
+  offset = log(n_transactions),
+  family = poisson,
+  data   = poisson_data
+)
+
+summary(poisson_model)
+```
+
+### 3.3. Overdispersion Check
+
+```{r}
+## Step 1: Compute Pearson dispersion ratio
+dispersion_ratio <- sum(residuals(poisson_model, type = "pearson")^2) / poisson_model$df.residual
+dispersion_ratio
+```
+
+**Observations:** The dispersion ratio of `r round(dispersion_ratio, 2)` indicates substantial overdispersion relative to the Poisson assumption of a ratio near 1. This means the standard errors and p-values from the plain Poisson model are unreliable and understate the true uncertainty. Quasi-Poisson and Negative Binomial specifications are therefore fitted as corrections in Section 3.4.
+
+### 3.4. Robustness: Quasi-Poisson and Negative Binomial
+
+```{r}
+## Step 1: Quasi-Poisson (rescales SEs by the dispersion ratio, same point estimate)
+quasipoisson_model <- glm(
+  fraud_count ~ time_bin,
+  offset = log(n_transactions),
+  family = quasipoisson,
+  data   = poisson_data
+)
+summary(quasipoisson_model)
+
+## Step 2: Negative Binomial (explicitly models the mean-variance relationship)
+nb_model <- glm.nb(
+  fraud_count ~ time_bin + offset(log(n_transactions)),
+  data = poisson_data
+)
+summary(nb_model)
+```
+
+### 3.5. Null Model Comparison (Linear Trend)
+
+```{r}
+## Step 1: Fit intercept-only null model
+null_model <- glm(
+  fraud_count ~ 1,
+  offset = log(n_transactions),
+  family = poisson,
+  data   = poisson_data
+)
+
+## Step 2: Compare via likelihood ratio test and AIC
+anova(null_model, poisson_model, test = "Chisq")
+AIC(null_model, poisson_model, nb_model)
+```
+
+**Observations:** The plain Poisson model shows a significant negative linear trend in `time_bin` (p < 0.001), but this result is unreliable given the overdispersion identified in Section 3.3. Under the quasi-Poisson correction, which inflates standard errors by the dispersion ratio, the same coefficient is no longer significant (p = 0.118). The Negative Binomial model, which explicitly models overdispersion via maximum likelihood rather than a flat SE rescaling, retains a significant negative trend (p = 0.007) and fits substantially better than both the null and plain Poisson models by AIC. This divergence between the two overdispersion corrections motivated a closer look at the shape of the trend, rather than accepting the linear specification at face value.
+
+```{r, fig.width=7, fig.height=4}
+## Step 3: Visualise observed vs fitted rate under the linear NB model
+poisson_data$fitted_rate_linear <- predict(nb_model, type = "response") / poisson_data$n_transactions
+
+ggplot(poisson_data, aes(x = bin_start_hr)) +
+  geom_point(aes(y = observed_rate), alpha = 0.6) +
+  geom_line(aes(y = fitted_rate_linear), colour = "firebrick", linewidth = 0.8) +
+  labs(
+    title = "Observed vs Fitted Fraud Rate (Linear NB Model)",
+    x = "Time (hours elapsed)",
+    y = "Fraud Rate (per transaction)"
+  ) +
+  theme_bw()
+```
+
+The plot reveals two prominent elevated bins around hours 26 and 28 (both falling in the second overnight period), which appear to be driving much of the fitted linear decline. This is consistent with a cyclical rather than monotonic pattern, examined formally in Section 3.6.
+
+\newpage
+
+### 3.6. Harmonic (Diurnal Cycle) Poisson Regression
+
+Rather than a monotonic linear trend, a 24-hour harmonic term more directly tests whether fraud rate follows a diurnal cycle, consistent with the two elevated overnight bins observed in Section 3.5.
+
+```{r}
+## Step 1: Add sin/cos harmonic terms based on a 24-hour period
+poisson_data <- poisson_data %>%
+  mutate(
+    hour_angle = 2 * pi * bin_start_hr / 24,
+    sin_24     = sin(hour_angle),
+    cos_24     = cos(hour_angle)
+  )
+
+## Step 2: Fit NB model with harmonic terms
+nb_harmonic_model <- glm.nb(
+  fraud_count ~ sin_24 + cos_24 + offset(log(n_transactions)),
+  data = poisson_data
+)
+
+summary(nb_harmonic_model)
+
+## Step 3: Compare null, linear, and harmonic NB models via AIC
+AIC(null_model, nb_model, nb_harmonic_model)
+
+## Step 4: Likelihood ratio test - harmonic model vs null
+null_nb_model <- glm.nb(
+  fraud_count ~ offset(log(n_transactions)),
+  data = poisson_data
+)
+
+anova(null_nb_model, nb_harmonic_model)
+```
+
+### 3.7. Peak Timing and Amplitude
+
+```{r}
+## Step 1: Extract amplitude and phase from the harmonic coefficients
+## NOTE: atan2(A, B), not atan2(B, A) - maximizing log(rate) = intercept +
+## A*sin(theta) + B*cos(theta) over theta requires solving
+## A*cos(theta) - B*sin(theta) = 0, giving theta* = atan2(A, B). The
+## arguments were originally swapped here, which understated the peak time
+## (reported ~2:36am; corrected value is ~3:25am) - caught and fixed while
+## extending this formula to the Sparkov account-level analysis.
+harmonic_coefs <- coef(nb_harmonic_model)
+A <- harmonic_coefs["sin_24"]
+B <- harmonic_coefs["cos_24"]
+
+amplitude        <- unname(sqrt(A^2 + B^2))
+peak_hour_of_day <- unname((atan2(A, B) * 24) / (2 * pi))
+peak_hour_of_day <- (peak_hour_of_day + 24) %% 24
+
+amplitude
+peak_hour_of_day
+```
+
+**Observations:** The harmonic model improves substantially on both the null model (AIC `r round(AIC(null_model),1)`) and the linear trend model (AIC `r round(AIC(nb_model),1)`), reaching an AIC of `r round(AIC(nb_harmonic_model),1)`, and the likelihood ratio test confirms the two harmonic terms jointly add significant explanatory power beyond the null (p < 0.001). The fitted cycle peaks at approximately `r sprintf("%.0f:%02.0f", floor(peak_hour_of_day), (peak_hour_of_day %% 1) * 60)` each day, with fraud rate at peak running roughly `r round(exp(amplitude), 1)`x the daily mean level. This is consistent with the relative fraud-risk pattern already documented in the Methodology Notebook (Section 6.6), which showed relative risk peaking 3-3.5x during low-activity overnight periods, now confirmed via an independent, model-based approach on the actual `Time` variable.
+
+```{r, fig.width=7, fig.height=4}
+## Step 2: Visualise fitted diurnal curve against observed rate
+poisson_data$fitted_rate_harmonic <- predict(nb_harmonic_model, type = "response") / poisson_data$n_transactions
+
+ggplot(poisson_data, aes(x = bin_start_hr)) +
+  geom_point(aes(y = observed_rate), alpha = 0.6) +
+  geom_line(aes(y = fitted_rate_harmonic), colour = "firebrick", linewidth = 0.8) +
+  labs(
+    title = "Observed vs Fitted Fraud Rate (Diurnal Harmonic Model)",
+    x = "Time (hours elapsed)",
+    y = "Fraud Rate (per transaction)"
+  ) +
+  theme_bw()
+```
+
+### 3.8. Residual Diagnostics
+
+```{r, fig.width=7, fig.height=4}
+## Step 1: Pearson residuals vs fitted
+poisson_data$resid_pearson <- residuals(nb_harmonic_model, type = "pearson")
+poisson_data$fitted_vals   <- fitted(nb_harmonic_model)
+
+ggplot(poisson_data, aes(x = fitted_vals, y = resid_pearson)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "red") +
+  labs(
+    title = "Pearson Residuals vs Fitted Values (Harmonic NB Model)",
+    x = "Fitted Values",
+    y = "Pearson Residuals"
+  ) +
+  theme_bw()
+
+## Step 2: Residuals vs time
+ggplot(poisson_data, aes(x = bin_start_hr, y = resid_pearson)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "red") +
+  geom_smooth(se = FALSE, colour = "steelblue", linewidth = 0.6) +
+  labs(
+    title = "Pearson Residuals vs Time (Harmonic NB Model)",
+    x = "Time (hours elapsed)",
+    y = "Pearson Residuals"
+  ) +
+  theme_bw()
+
+## Step 3: Refitted dispersion ratio
+dispersion_ratio_harmonic <- sum(poisson_data$resid_pearson^2) / nb_harmonic_model$df.residual
+dispersion_ratio_harmonic
+
+## Step 4: Bins with large residuals (|resid| > 2)
+poisson_data %>%
+  dplyr::filter(abs(resid_pearson) > 2) %>%
+  dplyr::select(time_bin, bin_start_hr, fraud_count, n_transactions, observed_rate,
+                fitted_rate_harmonic, resid_pearson)
+```
+
+**Observations:** The dispersion ratio falls from `r round(dispersion_ratio, 1)` under the plain Poisson model to `r round(dispersion_ratio_harmonic, 2)` under the harmonic Negative Binomial model, and the residuals-vs-time plot shows no remaining systematic wave pattern, indicating the harmonic term captures the dominant cyclical structure. Four bins retain residuals exceeding 2 in absolute value, two of which (hours 2 and 26, exactly one 24-hour cycle apart) sit close to the fitted peak and are both underpredicted, suggesting the true overnight surge may be somewhat more concentrated than a single sinusoid can represent. Given the already strong fit (dispersion ratio near 1) and the risk of overfitting a 48-bin series with additional harmonic terms, this is reported as a noted limitation rather than grounds for a more complex model specification.
+
+### 3.9. Full-Feature Poisson Regression with Harmonic Time (Individual-Level)
+
+Sections 3.1-3.8 modelled fraud rate at the aggregate (hourly-bin) level, using time alone as the predictor. A natural follow-up question is whether the same diurnal pattern holds at the individual-transaction level, once the full feature set (V1-V28, Amount) used in the Logistic Regression models in the Methodology Notebook is accounted for, with raw/proxy `Time` replaced by the harmonic time-of-day terms (`sin_24`, `cos_24`).
+
+Since `Class` is a binary outcome rather than a count, this specification is a "modified Poisson" (or log-binomial-style) regression (Zou, 2004): a Poisson model with a log link fitted to a binary outcome, used to obtain relative-risk-style coefficients rather than the odds ratios produced by logistic regression. Because the Poisson variance assumption (Var = Mean) does not hold for a Bernoulli outcome, robust (sandwich) standard errors are used for valid inference rather than the default `glm()` output.
+
+```{r}
+## Step 1: Add harmonic time terms to the individual-level dataset
+## (time_of_day_hr is computed here directly, so this section is
+## self-contained and does not depend on Section 4.1 having run first)
+set.seed(44940076)
+
+fraud_data <- fraud_data %>%
+  mutate(
+    time_of_day_hr = (Time %% 86400) / 3600,
+    hour_angle     = 2 * pi * time_of_day_hr / 24,
+    sin_24         = sin(hour_angle),
+    cos_24         = cos(hour_angle)
+  )
+
+## Step 2: Build the modelling dataset - same feature set as the LR models,
+## with raw/proxy Time replaced by the harmonic terms
+poisson_full_data <- fraud_data %>%
+  dplyr::select(V1:V28, Amount, sin_24, cos_24, Class)
+
+## Step 3: Fit Poisson ("modified Poisson" / log-binomial-style) regression
+poisson_full_model <- glm(
+  Class ~ .,
+  family = poisson(link = "log"),
+  data   = poisson_full_data
+)
+
+summary(poisson_full_model)
+```
+
+```{r, warning=FALSE, message=FALSE}
+## Step 4: Robust (sandwich) standard errors
+## Required because the Poisson variance assumption does not hold for a
+## binary outcome; this gives valid inference while retaining the
+## relative-risk interpretation of the coefficients.
+library(sandwich)
+library(lmtest)
+
+coeftest(poisson_full_model, vcov = vcovHC(poisson_full_model, type = "HC0"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+## Step 5: Discrimination metrics, for comparison with the full-dataset
+## LR results reported in the Methodology Notebook (Section 8.4.1)
+library(pROC)
+library(PRROC)
+
+poisson_full_pred <- predict(poisson_full_model, type = "response")
+
+## Sanity check: predicted probabilities should not meaningfully exceed 1
+## under the log link, given the low base rate
+max(poisson_full_pred)
+
+poisson_full_auc <- as.numeric(auc(
+  roc(response = poisson_full_data$Class, predictor = poisson_full_pred, quiet = TRUE)
+))
+
+poisson_full_pr <- pr.curve(
+  scores.class0 = poisson_full_pred[poisson_full_data$Class == 1],
+  scores.class1 = poisson_full_pred[poisson_full_data$Class == 0],
+  curve = FALSE
+)
+
+poisson_full_auc
+poisson_full_pr$auc.integral
+```
+
+**Observations:** Under robust standard errors, `sin_24` remains marginally significant (p = 0.016) while `cos_24` does not (p = 0.822), which is a weaker and more mixed result than the time-only aggregate model in Section 3.6, where both harmonic terms were clearly significant. The maximum predicted probability of `r round(max(poisson_full_pred), 2)` exceeds 1, confirming that the log-link specification is not well-calibrated at the individual level for this dataset, most likely driven by the same strong separators (V14, V4) identified in the Methodology Notebook's variable importance analysis (Section 9.2); AUC and AUPRC remain valid as rank-based metrics despite this, but the coefficient estimates themselves should not be over-interpreted. Discrimination (AUC = `r round(poisson_full_auc, 3)`, AUPRC = `r round(poisson_full_pr$auc.integral, 3)`) is also notably weaker than the full-dataset Logistic Regression results reported in the Methodology Notebook (AUPRC 0.760-0.769, Section 8.4), suggesting the modified Poisson specification is a less effective classifier here than standard LR even before considering the calibration issue.
+
+### 3.10. Joint Significance Test: Harmonic Terms Beyond the Full Feature Set
+
+Since `sin_24` and `cos_24` jointly define the amplitude and phase of a diurnal cycle, individual-coefficient significance is not the most defensible way to assess whether the cycle adds anything once V1-V28 and Amount are already in the model. A joint test, dropping both harmonic terms together, gives a single answer to that question.
+
+```{r}
+## Step 1: Fit the reduced model (drops sin_24 and cos_24)
+poisson_reduced_model <- glm(
+  Class ~ . - sin_24 - cos_24,
+  family = poisson(link = "log"),
+  data   = poisson_full_data
+)
+
+## Step 2: Standard likelihood ratio test
+anova(poisson_reduced_model, poisson_full_model, test = "Chisq")
+
+## Step 3: Robust Wald test, consistent with the sandwich SEs used in Section 3.9
+waldtest(
+  poisson_reduced_model, poisson_full_model,
+  vcov = vcovHC(poisson_full_model, type = "HC0"),
+  test = "Chisq"
+)
+```
+
+**Observations:** The two tests sit on opposite sides of the conventional 0.05 threshold, though both are close to it: the standard likelihood ratio test gives p = 0.051, while the robust Wald test (which accounts for the same variance-structure violation addressed in Section 3.9) gives p = 0.047. Rather than treating this as a clear pass or fail, the honest characterisation is that the diurnal cycle adds, at most, marginal explanatory power once V1-V28 and Amount are already in the model - a materially weaker result than the aggregate-level test in Section 3.6, where the harmonic terms improved substantially on the null model. This is consistent with the two-level picture that emerges across Sections 3 and 4: the diurnal cycle is a genuine and strong signal in aggregate fraud rate, but at the individual-transaction level it is largely redundant with the discriminative information already contained in the PCA-derived features, which is itself consistent with the thesis's broader argument that ULB's structural conditions limit the practical value of exploiting temporal structure directly.
+
+### 3.11. Checking Overdispersion at the Individual Level, and Testing NB Directly
+
+Given that Negative Binomial performed much better than Poisson at the aggregate (hourly-bin) level in Section 3.4-3.6, a natural question is why it was not also used for the individual-level model in Section 3.9. This is checked directly below, since the two settings are not automatically comparable: Section 3.4-3.6 modelled `fraud_count`, an actual count per bin, which can be over- or under-dispersed relative to the Poisson mean-variance assumption. Section 3.9 instead models `Class`, a binary outcome per transaction, for which the variance is mechanically fixed by the mean (Var = p(1-p)), leaving little scope for the kind of extra dispersion NB is designed to capture. This is tested empirically rather than assumed.
+
+```{r}
+## Step 1: Check whether the individual-level Poisson model is itself overdispersed
+## (the same diagnostic used in Section 3.3, applied to poisson_full_model)
+dispersion_ratio_full <- sum(residuals(poisson_full_model, type = "pearson")^2) /
+  poisson_full_model$df.residual
+
+dispersion_ratio_full
+
+## Step 2: Attempt NB directly on the individual-level data, as an empirical check
+## Note: Class is binary (0/1), not a count, so this tests whether glm.nb()
+## finds any meaningful overdispersion to model in the first place
+nb_full_model <- glm.nb(
+  Class ~ .,
+  data = poisson_full_data
+)
+
+summary(nb_full_model)
+
+## Step 3: Compare AIC directly against the Poisson specification
+AIC(poisson_full_model, nb_full_model)
+```
+
+**Observations:** Contrary to the initial expectation, the individual-level Poisson model was not simply well-specified as-is. The Pearson dispersion ratio of 0.44 suggested mild underdispersion under the standard diagnostic, but this diagnostic assumes the Poisson mean-variance relationship holds, which is undermined by the calibration issue already noted in Section 3.9 (maximum predicted probability of 5.67). The direct comparison is more reliable: `nb_full_model` converged to a finite, non-degenerate theta (0.435, distinct from Poisson's implicit theta of infinity), and AIC favoured the Negative Binomial specification by a substantial margin (3705.7 vs 3828.6 for Poisson, a difference of over 120 points). This indicates the individual-level binary outcome does carry meaningful overdispersion relative to the Poisson assumption, and that Negative Binomial - not Poisson - is the more appropriate specification here, consistent with the aggregate-level finding in Section 3.4-3.6 that NB substantially outperformed Poisson. The model fit did report an "alternation limit reached" warning during theta estimation, which is noted as a caveat on convergence rather than treated as invalidating the result, given AIC and the LRT in Section 3.12 both support the same conclusion.
+
+### 3.12. Joint Significance Test Under Negative Binomial (Individual-Level)
+
+Given Section 3.11 established Negative Binomial as the better-fitting specification, the joint significance test for the harmonic terms (paralleling Section 3.10's Poisson-based test) is repeated under NB. Since NB's likelihood already accounts for overdispersion internally, a standard likelihood ratio test is appropriate here, rather than the robust Wald correction used for the misspecified Poisson model in Section 3.10.
+
+```{r}
+## Step 1: Fit the reduced NB model (drops sin_24 and cos_24)
+nb_reduced_model <- glm.nb(
+  Class ~ . - sin_24 - cos_24,
+  data = poisson_full_data
+)
+
+## Step 2: Likelihood ratio test
+anova(nb_reduced_model, nb_full_model)
+
+## Step 3: Confirm relative model fit via AIC
+AIC(nb_reduced_model, nb_full_model)
+```
+
+**Observations:** Under the correctly-specified Negative Binomial model, the harmonic time terms are jointly significant (LRT p = 0.012), and the full model improves on the reduced model by AIC (3705.7 vs 3710.6). This is a materially different result from the Poisson-based test in Section 3.10, which found the same comparison to be borderline (p approximately 0.05) under a model now understood to be misspecified for this outcome. The corrected conclusion is that the diurnal cycle retains genuine, statistically significant explanatory power even after accounting for the full PCA feature set and Amount - a more meaningful individual-level finding than initially reported, and this is the result that should be treated as primary going forward. Sections 3.9-3.10 are retained to document the initial (Poisson-based) analysis and the reasoning that led to testing NB directly, consistent with reporting the full working rather than only the final specification.
+
+### 3.13. Discrimination Under the Negative Binomial Specification
+
+Sections 3.9-3.12 established Negative Binomial as the better-fitting model at the individual level, but the discrimination metrics reported in Section 3.9 (AUC, AUPRC) were computed under the earlier, misspecified Poisson model. These are recomputed here under `nb_full_model`, for a fair comparison against the full-dataset Logistic Regression benchmark reported in the Methodology Notebook (Section 8.4).
+
+```{r}
+## Step 1: Generate predictions from the NB model
+nb_full_pred <- predict(nb_full_model, type = "response")
+
+## Step 2: Sanity check - predicted probabilities under NB, same check as
+## performed for the Poisson model in Section 3.9
+max(nb_full_pred)
+
+## Step 3: AUC
+nb_full_auc <- as.numeric(auc(
+  roc(response = poisson_full_data$Class, predictor = nb_full_pred, quiet = TRUE)
+))
+nb_full_auc
+
+## Step 4: AUPRC
+nb_full_pr <- pr.curve(
+  scores.class0 = nb_full_pred[poisson_full_data$Class == 1],
+  scores.class1 = nb_full_pred[poisson_full_data$Class == 0],
+  curve = FALSE
+)
+nb_full_pr$auc.integral
+
+## Step 5: Direct comparison table against the Poisson specification
+discrimination_comparison <- data.frame(
+  Model = c("Poisson (Section 3.9)", "Negative Binomial (Section 3.13)"),
+  AUC   = c(poisson_full_auc, nb_full_auc),
+  AUPRC = c(poisson_full_pr$auc.integral, nb_full_pr$auc.integral)
+)
+
+pander(discrimination_comparison, digits = 4,
+       caption = "Discrimination Comparison: Poisson vs Negative Binomial (Individual-Level)")
+```
+
+**Observations:** Discrimination improves meaningfully under the Negative Binomial specification: AUC rises to `r round(nb_full_auc, 3)` (from 0.963 under Poisson) and AUPRC rises to `r round(nb_full_pr$auc.integral, 3)` (from 0.630 under Poisson), consistent with NB being the better-fitting model as established in Sections 3.11-3.12. This narrows, but does not close, the gap to the full-dataset Logistic Regression benchmark reported in the Methodology Notebook (AUPRC 0.760-0.769, Section 8.4).
+
+Calibration, however, is markedly worse under NB than under Poisson: the maximum predicted probability rises to `r round(max(nb_full_pred), 0)`, compared to 5.67 under the Poisson specification in Section 3.9. This is a substantially larger violation of the [0,1] probability bound, and is an expected consequence of the log link combined with NB's larger effective variance - the model is optimising the likelihood of the count-style outcome distribution rather than a properly bounded probability, and the improved AUC/AUPRC should not be read as evidence that the model produces usable probability estimates. As before, AUC and AUPRC remain valid as rank-based metrics despite this, since neither depends on predictions falling within [0,1], but the raw predicted values themselves should not be reported or interpreted as fraud probabilities. This calibration issue is a material limitation to state plainly if this analysis is presented as more than a discrimination-focused robustness check.
+
+### 3.14. Robustness Check: Full-Feature Logistic Regression with Harmonic Time
+
+Sections 3.9-3.13 approached the individual-level question through a log-link framework (Poisson, then Negative Binomial), motivated by wanting relative-risk-style coefficients comparable across the aggregate and individual-level analyses. Both specifications produced predicted values well outside the valid [0,1] range for a probability (5.67 under Poisson, `r round(max(nb_full_pred), 0)` under Negative Binomial), and the Negative Binomial fit additionally reported convergence warnings during dispersion estimation - reasons enough to treat both as exploratory rather than conclusive.
+
+Since `Class` is a binary outcome, logistic regression is the correctly-specified model for it directly, without requiring a log-link workaround or its attendant calibration issues. This section repeats the same joint significance test - whether the harmonic time terms add explanatory power beyond the full V1-V28 and Amount feature set - under a logistic specification, and reports discrimination metrics on a like-for-like basis against the full-dataset Logistic Regression benchmark already reported in the Methodology Notebook (Section 8.4), since both use the same model family.
+
+```{r}
+## Step 1: Fit full logistic regression model (Class ~ full feature set + harmonic time)
+## Reuses poisson_full_data (V1-V28, Amount, sin_24, cos_24, Class) built in Section 3.9.
+## Logistic regression is the correctly-specified model for a binary outcome, unlike
+## the log-link approaches attempted in Sections 3.9 and 3.11 - so no robust (sandwich)
+## SEs or overdispersion correction are needed here.
+glm_full_model <- glm(
+  Class ~ .,
+  family = binomial(link = "logit"),
+  data   = poisson_full_data
+)
+
+summary(glm_full_model)
+
+## Step 2: Fit reduced model (drops sin_24 and cos_24)
+glm_reduced_model <- glm(
+  Class ~ . - sin_24 - cos_24,
+  family = binomial(link = "logit"),
+  data   = poisson_full_data
+)
+
+## Step 3: Likelihood ratio test for joint significance of the harmonic terms
+glm_lrt <- anova(glm_reduced_model, glm_full_model, test = "Chisq")
+glm_lrt
+
+## Step 3a: Extract LRT statistics as plain variables for inline reporting below
+glm_lrt_df    <- glm_lrt$Df[2]
+glm_lrt_chisq <- round(glm_lrt$Deviance[2], 2)
+glm_lrt_p     <- format.pval(glm_lrt[["Pr(>Chi)"]][2], digits = 2, eps = 0.0001)
+```
+
+```{r, warning=FALSE, message=FALSE}
+## Step 4: Sanity check predicted probabilities stay within [0,1]
+## (guaranteed by the logit link, unlike the log link used in Sections 3.9 and 3.11,
+## where max predicted values reached 5.67 and 3174 respectively)
+glm_full_pred <- predict(glm_full_model, type = "response")
+range(glm_full_pred)
+
+## Step 5: Discrimination metrics, for direct comparison against the full-dataset
+## LR benchmark in the Methodology Notebook (Section 8.4.1) - a like-for-like
+## comparison, since both use the same model family
+glm_full_auc <- as.numeric(auc(
+  roc(response = poisson_full_data$Class, predictor = glm_full_pred, quiet = TRUE)
+))
+
+glm_full_pr <- pr.curve(
+  scores.class0 = glm_full_pred[poisson_full_data$Class == 1],
+  scores.class1 = glm_full_pred[poisson_full_data$Class == 0],
+  curve = FALSE
+)
+
+glm_full_auc
+glm_full_pr$auc.integral
+
+## Step 6: Summary comparison table across all three specifications attempted
+specification_comparison <- data.frame(
+  Model         = c("Poisson (log link)", "Negative Binomial (log link)", "Logistic Regression (logit link)"),
+  Max_Predicted = c(max(poisson_full_pred), max(nb_full_pred), max(glm_full_pred)),
+  AUC           = c(poisson_full_auc, nb_full_auc, glm_full_auc),
+  AUPRC         = c(poisson_full_pr$auc.integral, nb_full_pr$auc.integral, glm_full_pr$auc.integral)
+)
+
+pander(specification_comparison, digits = 4,
+       caption = "Individual-Level Specification Comparison: Poisson vs Negative Binomial vs Logistic Regression")
+```
+
+**Observations:** Unlike the log-link specifications attempted in Sections 3.9 and 3.11, logistic regression is correctly specified for a binary outcome, and this shows directly in the diagnostics: predicted probabilities span the full valid [0,1] range (minimum `r formatC(range(glm_full_pred)[1], format = "e", digits = 2)`, maximum `r round(range(glm_full_pred)[2], 6)`), with none of the calibration breakdown seen under Poisson (max 5.67) or Negative Binomial (max `r round(max(nb_full_pred), 0)`). The likelihood ratio test confirms the harmonic time terms are jointly significant beyond the full V1-V28 and Amount feature set (chi-squared(`r glm_lrt_df`) = `r glm_lrt_chisq`, p = `r glm_lrt_p`) - a clearer and better-supported result than either log-link attempt, and one that does not depend on an unstable or non-standard model specification. Discrimination also improves on both prior attempts: AUC = `r round(glm_full_auc, 3)` and AUPRC = `r round(glm_full_pr$auc.integral, 3)`, the latter sitting at the upper end of the full-dataset Logistic Regression benchmark already reported in the Methodology Notebook (AUPRC 0.760-0.769, Section 8.4). Because this model uses the same family as that benchmark, the comparison is directly interpretable: adding the harmonic time terms to the existing LR specification yields discrimination at least as good as, and marginally better than, the baseline model without them. This gives a clean, single-specification answer to the individual-level question, superseding the exploratory Poisson (Section 3.9) and Negative Binomial (Section 3.11) attempts, both of which are retained above to document the reasoning that led to this section rather than as the basis for any conclusion.
+
+\newpage
+
+## 4. Time Variable: 24-Hour Reset / Diurnal Folding
+
+This section addresses a related but distinct question: whether `Time`, when folded onto a 24-hour clock (`Time %% 86400`), shows a diurnal pattern consistent across both days of the observation window, as opposed to the aggregate rate-based test in Section 3.
+
+### 4.1. Compute Time-of-Day
+
+```{r}
+## Step 1: Fold Time onto a 24-hour clock and identify the day number
+fraud_data <- fraud_data %>%
+  mutate(
+    time_of_day_sec = Time %% 86400,
+    time_of_day_hr  = time_of_day_sec / 3600,
+    day_number      = floor(Time / 86400) + 1
+  )
+
+table(fraud_data$day_number)
+range(fraud_data$time_of_day_hr)
+```
+
+### 4.2. Overlay Day 1 and Day 2 - All Transactions
+
+```{r, fig.width=7, fig.height=4}
+ggplot(fraud_data, aes(x = time_of_day_hr, fill = factor(day_number))) +
+  geom_histogram(bins = 48, position = "identity", alpha = 0.5) +
+  labs(
+    title = "Transaction Volume by Time-of-Day, Overlaid Across Days",
+    x = "Time of Day (hours)",
+    y = "Transaction Count",
+    fill = "Day"
+  ) +
+  theme_bw()
+```
+
+### 4.3. Overlay Day 1 and Day 2 - Fraud Cases Only
+
+```{r, fig.width=7, fig.height=4}
+ggplot(fraud_data[fraud_data$Class == 1, ], aes(x = time_of_day_hr, fill = factor(day_number))) +
+  geom_histogram(bins = 48, position = "identity", alpha = 0.6) +
+  labs(
+    title = "Fraud Cases by Time-of-Day, Overlaid Across Days",
+    x = "Time of Day (hours)",
+    y = "Fraud Count",
+    fill = "Day"
+  ) +
+  theme_bw()
+```
+
+### 4.4. Fraud Rate by Time-of-Day (Both Days Combined)
+
+```{r, fig.width=7, fig.height=4}
+## Step 1: Bin time-of-day into hourly windows and compute rate
+time_of_day_summary <- fraud_data %>%
+  mutate(hour_bin = floor(time_of_day_hr)) %>%
+  group_by(hour_bin) %>%
+  summarise(
+    fraud_count    = sum(Class),
+    n_transactions = n(),
+    fraud_rate     = fraud_count / n_transactions,
+    .groups = "drop"
+  )
+
+pander(time_of_day_summary, caption = "Fraud Rate by Hour-of-Day (Days 1 and 2 Combined)")
+
+ggplot(time_of_day_summary, aes(x = hour_bin, y = fraud_rate)) +
+  geom_col(fill = "cornflowerblue", alpha = 0.7) +
+  labs(
+    title = "Fraud Rate by Hour-of-Day (Pooled Across Both Days)",
+    x = "Hour of Day",
+    y = "Fraud Rate (per transaction)"
+  ) +
+  theme_bw()
+```
+
+### 4.5. Day-to-Day Consistency Check
+
+```{r, fig.width=7, fig.height=4}
+fraud_data %>%
+  filter(Class == 1) %>%
+  mutate(hour_bin = floor(time_of_day_hr)) %>%
+  count(day_number, hour_bin) %>%
+  ggplot(aes(x = hour_bin, y = n, colour = factor(day_number))) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  labs(
+    title = "Fraud Count by Hour-of-Day, Day 1 vs Day 2",
+    x = "Hour of Day",
+    y = "Fraud Count",
+    colour = "Day"
+  ) +
+  theme_bw()
+```
+
+**Observations:** Transaction volume follows a consistent human-activity pattern across both days (Section 4.2), providing a reasonable baseline for comparing fraud patterns across the two days. The pooled fraud rate by hour-of-day (Section 4.4) shows a sharp peak at hour 2 and a secondary elevation at hour 4, consistent with the diurnal peak identified independently by the harmonic regression in Section 3.7. The day-to-day consistency check (Section 4.5) confirms that the hour-2 elevation recurs on both days (21 cases on Day 1, 36 on Day 2), distinguishing it as a genuine recurring pattern rather than a one-off event; by contrast, the large raw count at hour 11 on Day 1 (43 cases, versus approximately 10 on Day 2) is a single-day anomaly that is substantially diluted once normalised by the much higher transaction volume at that hour, and does not appear as a peak in the pooled rate view.
+
+## 5. Synthesis
+
+Three independent approaches now converge on the same finding: relative fraud-risk density (Methodology Notebook, Section 6.6), harmonic Negative Binomial regression on fraud rate (Section 3 of this notebook), and simple hour-of-day rate binning with a day-to-day consistency check (Section 4 of this notebook) all identify an elevated fraud rate concentrated in the early-morning hours (approximately 2-4am), consistent across both days of the observation window.
+
+This finding does not contradict the thesis's central null result regarding RSF versus Logistic Regression. The temporal structure identified here is aggregate and cyclical, most plausibly driven by reduced transaction volume and reduced monitoring overnight, rather than genuine instance-level time-to-event structure of the kind RSF's survival framework is designed to exploit. If anything, this sharpens the explanation for the null result: `Time` in the ULB dataset carries some real temporal signal, but of a form that a rate-based or classification-based model is well positioned to capture, while RSF's risk-accumulation framework offers no additional advantage in exploiting it.
+
+The individual-level extension was approached in three stages. A modified Poisson specification (Section 3.9) gave a borderline result once V1-V28 and Amount were included (Section 3.10, LRT p approximately 0.05) and showed predicted probabilities exceeding 1 (max 5.67), indicating the log link was not well-calibrated for this outcome. Since Negative Binomial had substantially outperformed Poisson at the aggregate level, it was tried next (Section 3.11) and found significant harmonic terms (Section 3.12, LRT p = 0.012) with improved discrimination (Section 3.13: AUC 0.976, AUPRC 0.696) - but at the cost of even worse calibration (max predicted value approximately 3174) and convergence warnings during fitting, making the result difficult to stand behind on its own.
+
+Since `Class` is a binary outcome, the log-link framework was never the right tool for this question in the first place; logistic regression is correctly specified for it directly. Refitted this way (Section 3.14), predicted probabilities span the full valid [0,1] range with no calibration issue, and the joint significance test for the harmonic terms is decisive rather than borderline (LRT p < 0.001). Discrimination improves further still (AUC 0.979, AUPRC 0.769), placing it at the upper end of the full-dataset Logistic Regression benchmark already reported in the Methodology Notebook (AUPRC 0.760-0.769, Section 8.4) - a genuinely like-for-like comparison, since both use the same model family. This is the individual-level result that should be treated as primary: the diurnal cycle retains real, statistically significant explanatory power beyond the PCA-derived features and Amount, established without any of the calibration caveats attached to the exploratory Poisson and Negative Binomial specifications that preceded it.
+
+Taken together, the diurnal cycle is a genuine, non-trivial temporal signal at both the aggregate and individual level - dominant in aggregate fraud rate, and more modest but still significant once the PCA-derived features are already accounting for most of the discriminative signal at the individual level. This distinct question of temporal signal versus classifier usability does not by itself resolve whether the RSF survival framework can exploit this structure more effectively than Logistic Regression, but it does sharpen the case for why `Time`'s exclusion from the survival specification does not compromise the thesis's central comparison.
