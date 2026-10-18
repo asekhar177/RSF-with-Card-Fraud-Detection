@@ -5,7 +5,7 @@
 set.seed(44940076)
 
 ## Step 2: Set Working Directory
-setwd("C:/Users/ashak/OneDrive/Knowledge/Research/5. Research Topic Experimentation")
+setwd("SET YOUR DIRECTORY")
 
 ## Step 3: Load Data
 credit <- read.csv('creditcard.csv', header = TRUE)
